@@ -1,7 +1,7 @@
 {
   "name": "implement-lifecycle",
   "description": "Cross-client implementation lifecycle with adversarial PR review — plan, implement, PR, review/address loop, verify, merge",
-  "version": "3.10.17",
+  "version": "3.10.18",
   "author": {
     "name": "benjamcalvin"
   },

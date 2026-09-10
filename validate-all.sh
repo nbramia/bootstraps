@@ -466,22 +466,12 @@ for plugin_dir in plugins/*/; do
       echo "  OK: Lifecycle suite capabilities reserve the authoritative suite for verify"
     fi
 
-    lifecycle_docs_graph=$(sed -n '/^<!-- lifecycle-docs-gate:v1$/,/^-->$/p' "$lifecycle_implement_skill")
-    lifecycle_expected_docs_graph='<!-- lifecycle-docs-gate:v1
-pending + review-docs -> reviewed
-reviewed + zero-actionable -> clean
-reviewed + actionable -> addressing
-addressing + address-complete -> addressed
-addressed + review-docs -> reviewed
-reviewed + convergence-escalation -> escalated
-addressed + convergence-escalation -> escalated
-clean + enter-verification -> verification
--->'
-    if [ "$lifecycle_docs_graph" != "$lifecycle_expected_docs_graph" ]; then
-      echo "  ERROR: Lifecycle docs gate must match the authoritative review/address/re-review state graph"
+    if rg -Fq '<!-- lifecycle-docs-gate:v1' "$lifecycle_implement_skill" || \
+      rg -Fq 'Phase 4.5' "$lifecycle_implement_skill"; then
+      echo "  ERROR: Documentation compliance must not exist as an independent gate or phase"
       ERRORS=$((ERRORS + 1))
     else
-      echo "  OK: Lifecycle docs gate requires a clean re-review before verification"
+      echo "  OK: Documentation relevance is folded into the single review round, not a separate gate"
     fi
 
     lifecycle_recovery_graph=$(sed -n '/^<!-- lifecycle-reviewer-recovery:v1$/,/^-->$/p' "$lifecycle_implement_skill")
@@ -508,21 +498,28 @@ complete + referee -> refereeing
     lifecycle_reviewer_output_invalid=false
     for lifecycle_reviewer in review-general review-correctness review-security review-architecture review-testing review-docs; do
       lifecycle_reviewer_file="$plugin_dir/skills/$lifecycle_reviewer/SKILL.md"
-      for lifecycle_heading in '### Action Required' '### Recommended' '### Minor' '### Summary'; do
+      for lifecycle_heading in '### Defects' '### Missing Tests' '### Status' '### Summary'; do
         if [ "$(rg -Fc "$lifecycle_heading" "$lifecycle_reviewer_file")" -ne 1 ]; then
           echo "  ERROR: $lifecycle_reviewer must return canonical heading $lifecycle_heading exactly once"
           ERRORS=$((ERRORS + 1))
           lifecycle_reviewer_output_invalid=true
         fi
       done
-      if ! rg -Fq 'Return all four headings. Write `None.` beneath every empty category.' "$lifecycle_reviewer_file"; then
+      if ! rg -Fq 'Return all four headings. Write `None.` beneath Defects and Missing Tests when empty.' "$lifecycle_reviewer_file"; then
         echo "  ERROR: $lifecycle_reviewer must require all canonical result headings"
         ERRORS=$((ERRORS + 1))
         lifecycle_reviewer_output_invalid=true
       fi
+      for lifecycle_stale_heading in '### Action Required' '### Recommended' '### Minor'; do
+        if rg -Fq "$lifecycle_stale_heading" "$lifecycle_reviewer_file"; then
+          echo "  ERROR: $lifecycle_reviewer must not retain the stale severity heading $lifecycle_stale_heading"
+          ERRORS=$((ERRORS + 1))
+          lifecycle_reviewer_output_invalid=true
+        fi
+      done
     done
     if [ "$lifecycle_reviewer_output_invalid" = false ]; then
-      echo "  OK: Every reviewer requires a non-empty four-heading canonical result"
+      echo "  OK: Every reviewer requires a non-empty four-heading canonical result of exactly two finding kinds plus status and summary"
     fi
 
     lifecycle_merge_file="$plugin_dir/skills/merge-pr/SKILL.md"

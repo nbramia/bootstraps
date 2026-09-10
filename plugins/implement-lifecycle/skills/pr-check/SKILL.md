@@ -69,36 +69,26 @@ For each check, output one of:
 
 ### Checks
 
+This check validates a title, a summary, and repository-required references. It does not audit the description's prose beyond that — no required evidence section, no verification matrix, no risk table, and no style grading of sentences below the summary.
+
 **1. Branch Naming (bundled fallback)**
 Branch must match `<type>/<short-description>` where type is one of: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`. Must be lowercase, hyphen-separated.
 
 **2. PR Title (bundled fallback)**
 Must match `<type>: <imperative summary>`. Type prefix should match branch type. Under 72 characters. No period at the end. Imperative mood ("Add", "Fix"), not past tense ("Added", "Fixed").
 
-**3. PR Description — TL;DR (bundled fallback)**
-Must open with 2-4 plain-language sentences explaining what the change does and why (a `## TL;DR` or `## Summary` section, before any mechanism). FAIL if the description opens with implementation bullets instead of prose a non-reader of the code could follow.
+**3. PR Description — Summary (bundled fallback)**
+Must open with a short plain-language summary of what the change does and why (a `## TL;DR` or `## Summary` section). FAIL only if the description has no such opening summary at all.
 
-**4. PR Description — Test Evidence (bundled fallback)**
-Must include how the change was verified: test output, manual steps, or "covered by existing tests."
-
-**5. Commit Messages (bundled fallback)**
+**4. Commit Messages (bundled fallback)**
 Each commit message should follow `<type>: <summary>` format. No "WIP", "fixup", or "wip" commits.
 
-**6. References (bundled fallback)**
+**5. References (bundled fallback)**
 If the change relates to a GitHub issue, it should reference it with an appropriate keyword:
 - `Closes #N` / `Fixes #N` — only when this single PR fully completes the issue
 - `Part of #N` — when the PR is one of several addressing the issue
 
 WARN if no references found (not all PRs need them, but flag for awareness). WARN if `Closes #N` is used but the PR appears to be a sub-task of a larger issue (e.g., the issue has multiple acceptance criteria and the PR only addresses some).
-
-**7. Altitude Layering (bundled fallback)**
-The description must descend through altitude layers rather than mixing them:
-- The TL;DR contains **no** file paths, function names, or line numbers — behavior in plain language only
-- Design reasoning (when present) is in component terms; code identifiers appear only in implementation-level sections (Implementation Notes, Test evidence, Review focus)
-- No sentence carries a claim, its mechanism, and a citation at once; citations sit at the end of their bullet, not mid-clause
-- No review chronology woven into the description ("round 1 added...", "after feedback we...")
-
-WARN on isolated violations; FAIL if the TL;DR is saturated with code identifiers or the layers are absent entirely.
 
 ### Scope Note (advisory — not scored)
 
@@ -117,13 +107,11 @@ Report a one-line observation. Say the PR is cohesive, or name the seam it shoul
 |---|-------|--------|-------|
 | 1 | Branch naming | PASS/WARN/FAIL | ... |
 | 2 | PR title | PASS/WARN/FAIL | ... |
-| 3 | TL;DR | PASS/WARN/FAIL | ... |
-| 4 | Test evidence | PASS/WARN/FAIL | ... |
-| 5 | Commit messages | PASS/WARN/FAIL | ... |
-| 6 | References | PASS/WARN/FAIL | ... |
-| 7 | Altitude layering | PASS/WARN/FAIL | ... |
+| 3 | Summary | PASS/WARN/FAIL | ... |
+| 4 | Commit messages | PASS/WARN/FAIL | ... |
+| 5 | References | PASS/WARN/FAIL | ... |
 
-**Result: X/7 passing, Y warnings, Z failures**
+**Result: X/5 passing, Y warnings, Z failures**
 
 **Scope (advisory):** <one line — cohesive, or the seam it should be split along>
 ```

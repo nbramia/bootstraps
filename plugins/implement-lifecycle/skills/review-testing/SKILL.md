@@ -85,11 +85,17 @@ For each test file changed or added:
 
 ## Finding Contract
 
-Every finding must name a concrete untested failure and the acceptance criterion, documented invariant, or changed behavior it could allow to regress. Explain why existing tests would miss it. Suggest the smallest correction within the PR's original scope; the referee may accept the concern without accepting your remedy. Do not propose a new dependency, executable subsystem, public interface, persistence mechanism, or architectural layer unless the original issue requires it.
+A finding is exactly one of two kinds:
+- **Defect** — an existing test that does not actually pin the behavior it claims to: it still passes with the production change reverted, it asserts on the wording of a comment, docstring, or description rather than behavior, or it is self-referential (its expected value or threshold is derived from the code under test rather than a spec, an independent calculation, or a hardcoded fixture). Name the test, the behavior it fails to pin, and how you confirmed it.
+- **Missing test** — a concrete untested execution path and the acceptance criterion, documented invariant, or changed behavior it could allow to regress. Explain why existing tests would miss it.
 
-Use **Recommended** only for concrete, in-scope gaps fixable without a new abstraction. Minor observations must not be framed as reasons to continue the review loop. For client, process, or integration boundaries, prefer a targeted test of the real boundary; reject self-confirming simulations that merely restate orchestration instructions or mock away the behavior under review.
+Suggest the smallest correction within the PR's original scope; the referee may accept the concern without accepting your remedy. Do not propose a new dependency, executable subsystem, public interface, persistence mechanism, or architectural layer unless the original issue requires it.
 
-**Self-referential acceptance checks.** When a PR uses a guard test that scans for forbidden strings or patterns (e.g., a lint that forbids a token), check that the guard fragments the forbidden string so the scan does not match its own source. A guard that contains the exact forbidden literal will falsely pass (or falsely fail) against itself.
+For client, process, or integration boundaries, prefer a targeted test of the real boundary; reject self-confirming simulations that merely restate orchestration instructions or mock away the behavior under review.
+
+**Self-referential acceptance checks.** When a PR uses a guard test that scans for forbidden strings or patterns (e.g., a lint that forbids a token), check that the guard fragments the forbidden string so the scan does not match its own source. A guard that contains the exact forbidden literal will falsely pass (or falsely fail) against itself — report this as a Defect.
+
+An observation that is neither kind — demanding coverage of an input no caller can produce, a preference for a different test framework or style with no backing standard, or "could use more tests" with no named path — is not a finding. Drop it silently rather than reporting it at a lower severity.
 
 ## Round Context
 
@@ -107,6 +113,8 @@ Do not expand later rounds into speculative coverage of surfaces unrelated to th
 - **Scope creep** — Don't review tests for code that wasn't changed by this PR.
 - **Review theater** — Don't report vague concerns like "could use more tests." Be specific about *what* path is untested and *why* it matters.
 - **Unanchored convention findings** — Don't insist on a test style unless the project guidance or local test suite establishes it.
+- **Enumerating unreachable inputs** — Don't demand coverage for inputs no caller can produce.
+- **Tooling status as a finding** — Don't report your own inability to execute a command as a finding; record it under Status.
 
 ## Output
 
@@ -114,16 +122,16 @@ Do not expand later rounds into speculative coverage of surfaces unrelated to th
 
 Return findings to the orchestrator as your final message, in exactly this structure:
 
-### Action Required
+### Defects
+- **[Testing]** Description of the test that fails to pin its behavior, file:line, and how you confirmed it (e.g., still passes with the change reverted)
+
+### Missing Tests
 - **[Testing]** Description with specific untested path, file:line in production code, and what test is missing
 
-### Recommended
-- **[Testing]** Description with specific file:line and what would improve test quality
-
-### Minor
-- **[Testing]** Description with specific file:line references
+### Status
+<whether you executed the PR's focused tests/build, and if not, why — never a finding>
 
 ### Summary
 <1-2 sentence assessment focused on test adequacy and quality>
 
-Return all four headings. Write `None.` beneath every empty category. If test coverage and quality look solid, say so explicitly in Summary.
+Return all four headings. Write `None.` beneath Defects and Missing Tests when empty. If test coverage and quality look solid, say so explicitly in Summary.

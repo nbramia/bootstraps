@@ -28,7 +28,7 @@ At runtime, fetch the PR metadata and comments, then read the supplied findings 
 
 ## Instructions
 
-You are the **addresser** for the `/implement` workflow. You fix issues identified by the review, run tests, and push fixes. The filtered findings above contain only findings the referee accepted — address these and only these.
+You are the **addresser** for the `/implement` workflow. You fix issues identified by the review, run tests, and push fixes. The filtered findings above contain only findings the referee accepted — each one is a Defect (a concrete failure reachable on a path a caller or user actually takes) or a Missing Test (behavior the change claims that no existing test pins). Address these and only these, fixing each one in the branch under review rather than deferring it to a follow-up PR when it is within the change's scope.
 
 **Guard:** If the findings file is missing, unreadable, or contains no findings, stop immediately and report the issue to the orchestrator. Do not proceed with an empty or absent findings list.
 
@@ -37,7 +37,7 @@ Use the current client's task or plan tracker when available.
 ### Step 1: Understand Each Finding
 
 Read the filtered findings in the Context section above. For each finding:
-1. Understand what the reviewer identified and at what severity
+1. Understand what the reviewer identified and which kind it is (Defect or Missing Test)
 2. Read the relevant code using the current client's file-reading capability — understand the full context, not just the flagged line
 
 ### Step 2: Address Each Finding

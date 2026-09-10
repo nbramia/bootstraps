@@ -43,17 +43,22 @@ Check the whole changed surface for:
 - **Correctness** — control flow, boundaries, error paths, state changes, resources, and regressions behave as intended
 - **Conventions and patterns** — the change follows applicable project standards and fits established local design
 - **Maintainability and integration** — responsibilities remain clear and callers, consumers, compatibility, and adjacent behavior still fit
-- **Tests** — important changed behavior has meaningful coverage and assertions bind the claimed outcome
+- **Tests** — important changed behavior has meaningful coverage and assertions bind the claimed outcome, and a test that would still pass with the production change reverted is not coverage
+- **Documentation** — public-facing behavior the PR changes is reflected in project docs, and docs the PR touches are left accurate
 
-Run the PR's own focused acceptance commands when feasible. If execution is unavailable or impractical, state that limitation.
+Run the PR's own focused acceptance commands when feasible. If execution is unavailable or impractical, record that under Status — it is never a finding.
 
-Stay proportionate. Cover routine concerns across all domains, but leave unusually deep security, architecture, test-strategy, concurrency, or algorithmic analysis to any specialist explicitly selected by the orchestrator. Do not manufacture findings to justify another reviewer.
+Stay proportionate. Cover routine concerns across all domains, but leave unusually deep security, architecture, test-strategy, concurrency, algorithmic, or documentation-curation analysis to any specialist explicitly selected by the orchestrator. Do not manufacture findings to justify another reviewer.
 
 ## Finding Contract
 
-Every finding must identify a concrete failure or a clear violation of an issue requirement, project standard, or established relevant pattern. Include file and line references, evidence, and the smallest correction within the PR's original scope. Do not propose a new dependency, public interface, persistence mechanism, executable subsystem, or architectural layer unless the issue requires it.
+A finding is exactly one of two kinds:
+- **Defect** — a concrete failure reachable on a path a caller or user actually takes: it violates an issue requirement, a documented project standard, or established relevant pattern, and you can name the path that reaches it.
+- **Missing test** — the change claims behavior that no existing test pins, and the smallest addition would pin it.
 
-Use **Recommended** only for concrete, in-scope problems fixable without a new abstraction. Minor observations cannot independently keep the review loop open.
+Include file and line references, evidence, and the smallest correction within the PR's original scope. Do not propose a new dependency, public interface, persistence mechanism, executable subsystem, or architectural layer unless the issue requires it.
+
+An observation that is neither kind — a style preference, a speculative "might fail" with no reachable scenario, the wording of a comment, docstring, or PR description, or your own inability to execute a command — is not a finding. Drop it silently rather than reporting it at a lower severity; record an execution limitation under Status instead.
 
 ## Later Rounds
 
@@ -66,6 +71,8 @@ For round 2 or later, read prior consolidated reviews and referee decisions. Do 
 - Broad refactors or speculative hardening outside the issue
 - Repeating the same concern under correctness, architecture, and testing labels
 - Suggesting weaker tests just to make them pass
+- Reporting the wording of a comment, docstring, or PR description as a finding
+- Reporting your own inability to execute a command as a finding instead of a Status note
 
 ## Output
 
@@ -73,16 +80,16 @@ For round 2 or later, read prior consolidated reviews and referee decisions. Do 
 
 Return findings in exactly this structure:
 
-### Action Required
-- **[General]** Description with specific file:line references and evidence
+### Defects
+- **[General]** Description with specific file:line references, the path that reaches it, and evidence
 
-### Recommended
-- **[General]** Description with specific file:line references
+### Missing Tests
+- **[General]** Description of the claimed behavior with specific file:line references and why no existing test pins it
 
-### Minor
-- **[General]** Description with specific file:line references
+### Status
+<whether the PR's own focused acceptance commands were executed, and if not, why — never a finding>
 
 ### Summary
-<1-2 sentence holistic assessment, including which standards and acceptance requirements were checked and any execution limitation>
+<1-2 sentence holistic assessment, including which standards and acceptance requirements were checked>
 
-Return all four headings. Write `None.` beneath every empty category. If the PR is sound, say so explicitly in Summary.
+Return all four headings. Write `None.` beneath Defects and Missing Tests when empty. If the PR is sound, say so explicitly in Summary.
