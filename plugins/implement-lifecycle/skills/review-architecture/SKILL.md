@@ -69,9 +69,13 @@ For each changed file, evaluate:
 
 ## Finding Contract
 
-Every finding must name a concrete failure or maintenance consequence and the acceptance criterion, documented architectural invariant, or established project pattern it violates. Cite that evidence. Suggest the smallest correction within the PR's original scope; the referee may accept the concern without accepting your remedy. Do not propose a new dependency, executable subsystem, public interface, persistence mechanism, or architectural layer unless the original issue requires it.
+A finding is exactly one of two kinds:
+- **Defect** — a concrete failure or maintenance consequence reachable on a path a caller, consumer, or future maintainer actually takes, and the acceptance criterion, documented architectural invariant, or established project pattern it violates.
+- **Missing test** — the change claims a structural contract (an interface boundary, an invariant across modules) that no existing test pins.
 
-Use **Recommended** only for concrete, in-scope problems fixable without a new abstraction. Minor observations must not be framed as reasons to continue the review loop. When prior review fixes introduced the architecture now attracting findings, prefer simplifying or removing it over further hardening.
+Cite that evidence. Suggest the smallest correction within the PR's original scope; the referee may accept the concern without accepting your remedy. Do not propose a new dependency, executable subsystem, public interface, persistence mechanism, or architectural layer unless the original issue requires it.
+
+An observation that is neither kind — "this feels wrong" with no concrete consequence, a premature-abstraction suggestion for something that exists once, or the wording of a comment or docstring — is not a finding. Drop it silently rather than reporting it at a lower severity. When prior review fixes introduced the architecture now attracting findings, prefer simplifying or removing it over further hardening.
 
 ## Round Context
 
@@ -90,6 +94,8 @@ Do not expand later rounds into speculative hardening of surfaces unrelated to t
 - **Theoretical concerns** — Every finding should be grounded in a concrete consequence ("this will cause X"), not just "this feels wrong."
 - **Blocking on style** — Formatting, naming preferences, and cosmetic issues belong in a standards check, not an architecture review.
 - **Unanchored pattern complaints** — Don't call something architecturally inconsistent unless you found the relevant project pattern or decision.
+- **Prose wording** — Don't report the wording of a comment or docstring as a finding.
+- **Tooling status as a finding** — Don't report your own inability to execute a command as a finding; record it under Status.
 
 ## Output
 
@@ -97,16 +103,16 @@ Do not expand later rounds into speculative hardening of surfaces unrelated to t
 
 Return findings to the orchestrator as your final message, in exactly this structure:
 
-### Action Required
-- **[Architecture]** Description with specific file:line and architectural concern
+### Defects
+- **[Architecture]** Description with specific file:line, the concrete consequence, and architectural concern
 
-### Recommended
-- **[Architecture]** Description with specific file:line and what would be better
+### Missing Tests
+- **[Architecture]** Description of the claimed structural contract with specific file:line references and why no existing test pins it
 
-### Minor
-- **[Architecture]** Description with specific file:line references
+### Status
+<whether you executed the PR's focused tests/build, and if not, why — never a finding>
 
 ### Summary
 <1-2 sentence assessment focused on architectural fit and long-term health>
 
-Return all four headings. Write `None.` beneath every empty category. If the architecture looks solid, say so explicitly in Summary.
+Return all four headings. Write `None.` beneath Defects and Missing Tests when empty. If the architecture looks solid, say so explicitly in Summary.

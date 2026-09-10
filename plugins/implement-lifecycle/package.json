@@ -1,6 +1,6 @@
 {
   "name": "implement-lifecycle",
-  "version": "3.10.10",
+  "version": "3.10.18",
   "description": "Harness-neutral implementation lifecycle with adversarial PR review",
   "private": true,
   "keywords": ["pi-package", "agent-skills", "implementation", "review", "lifecycle"],

@@ -27,11 +27,66 @@ $ARGUMENTS
 
 At runtime, inspect the current branch and recent commits. Fetch any referenced issue and its comments before delegating.
 
+## Target repository contract
+
+When the target repository contains `docs/specs/standards/development-lifecycle.md`,
+read it together with `AGENTS.md`, `CLAUDE.md`, and applicable standards before
+choosing phases or delegating work. Treat that repository document as the
+authoritative project policy; this plugin supplies harness-neutral mechanics
+and must not duplicate or override repository-specific lifecycle rules.
+
+Explicit user instructions given at invocation precede both this plugin's
+default mechanics and the target repository's default process policy where
+the two conflict (e.g. a user requesting full delegated review on a routine
+change, or a narrower scope than default policy would otherwise run) — never
+silently substitute a repository or plugin default for an instruction the
+user actually gave. This does not extend to a repository's enforced technical
+or compliance constraints (required checks, branch protection, required
+approvals): an ordinary task cannot use a user instruction to waive, weaken,
+or falsely report a real, still-enforced gate, per Phase 6's own precedence
+rule. The one exception is a task whose own explicit, authorized scope IS to
+change that policy or configuration itself (e.g. a task to edit branch
+protection, required-check bindings, or this repository's own lifecycle
+contract) — that authorization comes from the task's stated scope, never
+from a same-task attempt to route around its own gate.
+
+If that repository documents a shared development-metrics recorder, mint one
+opaque run id for this task (or reuse an inherited one) and include it in the
+context bundle below so every delegated phase's metrics record joins the same
+run instead of each minting its own.
+
+### Routine inline path
+
+This orchestrator implements and reviews inline **by default**: make the edit
+yourself, run only the focused check that policy calls for (or note none is
+observable), open the PR, and apply the one proportionate review that policy
+calls for — instead of delegating to `implement-code`. This path always folds
+any docs relevance into that same single review rather than running a
+separate delegated documentation-compliance gate, regardless of whether the
+change has an observable or documented surface.
+
+Escalate to the full delegated lifecycle below instead of taking this default
+when the target repository's risk policy classifies the task as requiring
+independent adversarial review (per its own risk table), or — absent a
+documented repository risk policy — when the task touches any of: behavior
+only observable in the running application, concurrency or resource
+ownership, schema or public API compatibility, authentication or privacy
+boundaries, money movement, or irreversible data loss. Also escalate when the
+user has requested the full delegated lifecycle. Never invent a narrower or
+broader notion of these triggers than the repository's own risk table (when
+one exists) would recognize. Explicit user instructions override this
+default in either direction: a user asking for full review on a task that
+would otherwise stay inline gets it; a user explicitly authorizing this
+inline path for a task that would otherwise escalate gets that instead of
+forced delegation. The mandatory delegation and no-self-edit rules below
+govern the full delegated lifecycle; they do not apply while this routine
+inline path is in effect.
+
 ## Instructions
 
 <!-- stop-guard:active -->
 
-You are a **lean orchestrator** — a supervisor who delegates, not an implementer. Every heavy phase runs in an isolated delegated agent; worker skills define the work but do not create that isolation themselves. **You MUST NOT use file-editing tools to modify source code, tests, or documentation.** You may use the shell for git/gh commands and tests, and the current client's read/search capabilities for refereeing, but never edit the codebase under review yourself.
+You are a **lean orchestrator** — a supervisor who delegates, not an implementer, for any task outside the routine inline path above. Every heavy phase in the full delegated lifecycle runs in an isolated delegated agent; worker skills define the work but do not create that isolation themselves. **Outside the routine inline path, you MUST NOT use file-editing tools to modify source code, tests, or documentation.** You may use the shell for git/gh commands and tests, and the current client's read/search capabilities for refereeing, but never edit the codebase under review yourself except as that path explicitly permits.
 
 **Permitted carve-out — orchestration scratch files:** Writing non-source orchestration files for findings handoff is expected and allowed. Resolve a writable scratch location through the harness when it provides one; otherwise ask the operating system to create a temporary file or directory. Record each resolved path and pass it explicitly to the receiving worker. The prohibition targets modifying the codebase under review — source, tests, and docs — not writing orchestration scratch files.
 
@@ -71,11 +126,11 @@ For every delegation, use the adapter for the active harness to create a fresh i
 
 **Pi adapter.** With the user-installed `pi-subagents` prerequisite available, launch a generic `delegate` child with `skill: <skill>`, `context: "fresh"`, and the complete payload and fresh context bundle. Never rely on the delegate default for context freshness. Do not use or distribute custom Pi agent definitions.
 
-**Generic adapter.** A compatible harness must create a fresh isolated child, load the mapped Agent Skill explicitly, pass the complete payload and fresh context bundle, and return the child result. A harness that cannot provide isolated delegation or load the required skill must report the failed phase and must not execute it inline.
+**Generic adapter.** A compatible harness must create a fresh isolated child, load the mapped Agent Skill explicitly, pass the complete payload and fresh context bundle, and return the child result. A harness that cannot provide isolated delegation or load the required skill must report the failed phase and must not execute it inline **as a substitute for that delegation** — this does not apply to the routine inline path above, which is an intentional non-delegated path chosen by policy, not a fallback for a harness's missing capability.
 
 When specialists are selected, every adapter launches the selected reviewers in parallel and waits for all their results before refereeing.
 
-Selected Pi reviewers remain parallel, read-only children. Each delegation explicitly names its canonical `skill`, sets `context: "fresh"`, and captures the child's final result. A reviewer result is complete only when it is non-empty and contains all four canonical headings: `### Action Required`, `### Recommended`, `### Minor`, and `### Summary`. Do not referee an empty, missing, or structurally incomplete result.
+Selected Pi reviewers remain parallel, read-only children. Each delegation explicitly names its canonical `skill`, sets `context: "fresh"`, and captures the child's final result. A reviewer result is complete only when it is non-empty and contains all four canonical headings: `### Defects`, `### Missing Tests`, `### Status`, and `### Summary`. Do not referee an empty, missing, or structurally incomplete result.
 
 The reviewer-result recovery contract is this exact state graph:
 
@@ -92,7 +147,7 @@ complete + referee -> refereeing
 
 On an incomplete result, first recover the final captured result from the harness transcript when available. If recovery is unavailable or still incomplete, retry once in a new child with the same canonical skill and `context: "fresh"`. If that retry is incomplete, stop the phase and report the failed delegation. Only the `complete` state may enter refereeing.
 
-**Isolate delegated context.** Each delegated agent (implementer, addresser, reviewer, verifier) should be launched with MINIMAL, FRESH context: the PR/issue being worked, the governing contract (issue body, ADR, or spec), the current diff, and any prior accepted/rejected findings — NOT the orchestrator's accumulated cross-PR history. Long-lived or reused sessions (e.g., a docs gate or verifier kept alive across multiple PRs) accumulate unrelated context and degrade review quality; reset or bound them per PR. Assemble a single shared **context bundle** (issue, contract, diff, prior findings, referee decisions) and pass the same bundle to every child for that PR, so each starts from the same ground truth instead of re-deriving it.
+**Isolate delegated context.** Each delegated agent (implementer, addresser, reviewer, verifier) should be launched with MINIMAL, FRESH context: the PR/issue being worked, the governing contract (issue body, ADR, or spec), the current diff, and any prior accepted/rejected findings — NOT the orchestrator's accumulated cross-PR history. Long-lived or reused sessions (e.g., a docs gate or verifier kept alive across multiple PRs) accumulate unrelated context and degrade review quality; reset or bound them per PR. Assemble a single shared **context bundle** (issue, contract, diff, prior findings, referee decisions, and the run id described above when the target repository has a metrics recorder) and pass the same bundle to every child for that PR, so each starts from the same ground truth instead of re-deriving it.
 
 ### Entry Point
 
@@ -152,9 +207,11 @@ EOF
 
 ### Phase 4: Review/Address Loop {#review-loop}
 
-**This is a mandatory loop.** It repeats Steps A → B → C → D → E for each round until one of exactly two exit conditions is met:
+**One round-based convergence bound covers this loop.** Track a running round count for this task's Phase 4 review/address cycle. This bound cannot be reset, hidden, or bypassed by rewriting history: a revise-and-reset or restart-clean recovery (Step E below) may change the branch, scope, or approach, but it never zeroes the count already spent — if the bound is already exhausted when a stall or scope guard fires again, escalate to the user rather than starting another revised or clean attempt.
 
-1. **Clean exit (Step B):** Zero findings survive referee filtering — including a round whose findings were all rejected — → skip to Phase 4.5. If the rejections were close calls (the underlying concern was valid but the remedy was out of scope), consider escalating for human direction instead of silently proceeding.
+**This is a mandatory loop, and it converges on silence.** One round runs by default; a further round runs only when the immediately preceding round forwarded an accepted finding to the addresser. It repeats Steps A → B → C → D → E for each round until one of exactly two exit conditions is met:
+
+1. **Clean exit (Step B):** Zero findings survive referee filtering — including a round whose findings were all rejected — → skip to Phase 5. Terminate without invoking an addresser or another reviewer. If the rejections were close calls (the underlying concern was valid but the remedy was out of scope), consider escalating for human direction instead of silently proceeding.
 2. **Escalation exit (Step E):** A scope/convergence guard fires, OR convergence stalls (two consecutive rounds forward no fewer accepted findings than the prior round), OR round 5 is reached → stop the loop and run the **convergence-recovery decision** in Step E. Recovery is not a single path: revise-and-reset, restart-clean, or escalate to the user.
 
 There is no other way to exit this loop. Each round: General review plus any targeted specialist reviews → Referee (you) → Addresser → next round. **The loop continues while it is converging; it escalates when convergence stalls.** Convergence = each round forwards **strictly fewer** accepted findings than the prior round, with no open production defect and no review-introduced churn. Stalled = two consecutive rounds forward no fewer accepted findings than the prior round. Escalation is driven by stalled convergence or a scope guard, not by a fixed round count. Do not continue past 5 rounds without explicit user authorization even when converging, but you are NOT required to hit 5 — on a stall, first consider recovering the run (revise-and-reset or restart-clean, below) before escalating to a human.
@@ -198,6 +255,7 @@ Then decide whether the PR has a concrete high-risk area that needs deeper speci
 - `review-security` — Trust boundaries, authZ, sensitive data, security requirements, injection risks
 - `review-architecture` — Pattern consistency, module boundaries, coupling, forward-looking design
 - `review-testing` — Test coverage, assertion quality, edge cases, test anti-patterns
+- `review-docs` — Missing, stale, or contradicted documentation; undocumented new public-facing surfaces
 
 Use judgment from the PR summary, changed-file list, and issue/spec context:
 - **Routine, well-bounded PRs:** run only `review-general`.
@@ -205,8 +263,9 @@ Use judgment from the PR summary, changed-file list, and issue/spec context:
 - Add **`review-security`** for auth/authz, untrusted input, secrets, external integrations, sensitive data, or permission boundaries.
 - Add **`review-architecture`** for consequential new abstractions, dependency shifts, public APIs, structural refactors, or changes spanning architectural boundaries.
 - Add **`review-testing`** when test strategy itself is risky: complex fixtures, weak or missing regression coverage, multiple test layers, nondeterminism, or substantial test-harness changes.
+- Add **`review-docs`** for a change to public-facing behavior (new CLI command, changed default, public API, plugin surface, config option), a change that restructures internals with observable effects, or any change to documentation files.
 - Prefer zero specialists for routine work and one specialist for a focused risk. Use multiple specialists only when the PR genuinely contains multiple independent high-risk surfaces, and record why each was selected.
-- Do not select a specialist merely because files in its domain changed. The general reviewer already covers ordinary correctness, patterns, requirements, and test adequacy.
+- Do not select a specialist merely because files in its domain changed. The general reviewer already covers ordinary correctness, patterns, requirements, and test adequacy, including whether the change leaves accurate documentation behind.
 
 Invoke the general reviewer and any selected specialists in parallel through the client adapter:
 
@@ -216,13 +275,13 @@ Payload: Review PR #<pr-number>, round <round-number>
 
 Each reviewer fetches PR context and returns its findings to you. Reviewers do **not** post to GitHub — you publish their findings in the consolidated comment in Step C, so keep each reviewer's returned text until then. In round 2 and later, tell reviewers to focus on unresolved accepted findings, the latest fix delta, and regressions introduced by accepted fixes. They must not reopen rejected findings or speculatively harden unrelated surfaces.
 
-**Reviewers should execute the PR's own focused acceptance commands when feasible** — focused tests, linters, or commands the PR claims to satisfy — rather than only reasoning about them. They must follow their `focused-only` capability. Reasoning alone misses mechanical acceptance failures (self-referential scans, off-by-one anchors, unbuilt code). If a reviewer cannot execute (no environment), it must state that limitation explicitly rather than assert correctness it did not verify.
+**Reviewers should execute the PR's own focused acceptance commands when feasible** — focused tests, linters, or commands the PR claims to satisfy — rather than only reasoning about them. They must follow their `focused-only` capability. Reasoning alone misses mechanical acceptance failures (self-referential scans, off-by-one anchors, unbuilt code). If a reviewer cannot execute (no environment or a sandbox limitation), it records that under its own Status heading rather than asserting correctness it did not verify. A reviewer's execution or sandbox failure is a status on its review, not a finding — it never appears under Defects or Missing Tests, and it never consumes a referee decision or a round.
 
 **Reassess specialists each round.** Always keep `review-general`. Re-invoke a specialist only when the latest fix delta or an unresolved accepted finding still touches its high-risk area. Drop specialists whose concern is resolved and whose area was not changed; do not spend another review merely to preserve the prior round's roster.
 
 #### Step B: Referee Evaluation
 
-When reviewers return, **independently evaluate every finding**. Read the relevant code yourself. Do not rubber-stamp and do not dismiss without checking.
+When reviewers return, **independently evaluate every finding**. Read the relevant code yourself. Do not rubber-stamp and do not dismiss without checking. A reviewer reports at most two kinds of finding — a defect reachable on a path a caller or user actually takes, and a missing test for behavior the change itself claims to deliver — and drops everything else at the source rather than sending it to you at a lower tier; treat any finding that arrives outside those two kinds as out of contract and reject it without spending further attention on it. A reviewer's own execution or sandbox failure arrives under its Status heading, never as a finding, and consumes no referee decision.
 
 **Deduplicate across reviewers first.** Two specialists often return the same underlying gap (e.g. architecture and security both flag the same catalog conflict, or three reviewers all flag the same orphan-demanded field). Before evaluating, collapse duplicate findings into one entry, note the cross-reviewer duplication, and evaluate that single concern once. Do not count a duplicate as multiple independent findings or forward it to the addresser multiple times.
 
@@ -241,9 +300,8 @@ For each finding, decide:
 **Default postures** (err on the side of accepting):
 - Default to **accept** only after verifying the concrete failure and its violated criterion or invariant.
 - **Security findings:** Treat a concrete, applicable security failure as high priority; reject theoretical attacks whose preconditions the changed code cannot meet.
-- **Convention findings:** Accept if the code violates a documented standard. Reject if purely stylistic preference with no backing standard.
-- **Recommended findings:** Accept only when concrete, in scope, and achievable without a new abstraction.
-- **Minor findings:** Record them, but they cannot independently keep the loop open or trigger an address round.
+- **Convention findings:** Accept only when the code violates a documented standard in a way that is reachable on a normal path. Reject a purely stylistic preference with no backing standard, and reject a finding about the wording of a comment, docstring, or PR description — no reviewer's contract permits reporting prose wording as a finding, so treat one that arrives anyway as out of contract.
+- **Missing-test findings:** Accept only when the change claims behavior that no existing test pins, and the smallest addition would pin it.
 - **Vague "consider" / "might" language:** Reject unless it is backed by a reproducible failure or violated criterion.
 
 Produce a **filtered action plan** containing only accepted findings.
@@ -259,7 +317,7 @@ Use these calibration cases:
 - Speculative hardening with no demonstrated failure: **Reject**.
 - Second non-clean round dominated by review-introduced complexity: run the convergence audit, stop before round 3, and request human direction. Recommend bounded simplification or removal of the review-introduced architecture.
 
-**If zero findings survive filtering**, still post the consolidated comment from Step C so the reviewers' raw findings and your rejection reasoning stay on the record, ending it with `**Result:** no actionable findings — review loop complete.` Then skip to Phase 4.5.
+**If zero findings survive filtering**, still post the consolidated comment from Step C so the reviewers' raw findings and your rejection reasoning stay on the record, ending it with `**Result:** no actionable findings — review loop complete.` Then skip to Phase 5.
 
 #### Step C: Post the Consolidated Review & Write Findings File
 
@@ -276,7 +334,7 @@ gh pr comment <number> --body "$(cat <<'EOF'
 ### Reviewer Findings
 
 #### General
-<that reviewer's returned findings, verbatim under its Action Required / Recommended / Minor headings>
+<that reviewer's returned findings, verbatim under its Defects / Missing Tests / Status headings>
 
 #### <Specialty, only when invoked>
 <...>
@@ -285,9 +343,9 @@ gh pr comment <number> --body "$(cat <<'EOF'
 
 ### Referee Decisions
 
-| # | Finding | Reviewer | Reviewer Severity | Concern | Decision | Reasoning / smallest remedy |
-|---|---------|----------|-------------------|---------|----------|-----------------------------|
-| 1 | <brief description> | correctness | Action Required / Recommended / Minor | Valid / Unproven | Accept / Reject | <why and, if accepted, the bounded correction> |
+| # | Finding | Reviewer | Kind | Concern | Decision | Reasoning / smallest remedy |
+|---|---------|----------|------|---------|----------|-----------------------------|
+| 1 | <brief description> | correctness | Defect / Missing Test | Valid / Unproven | Accept / Reject | <why and, if accepted, the bounded correction> |
 | ... | ... | ... | ... | ... | ... | ... |
 
 **Findings forwarded to addresser:** <count>
@@ -303,9 +361,9 @@ Write the filtered findings (accepted only) to a temp file for the addresser:
 cat > <resolved-findings-path> <<'EOF'
 # Filtered Findings — Round <N>
 
-| # | Finding | Severity | Details |
-|---|---------|----------|---------|
-| 1 | <description> | <severity> | <file:line + what to fix> |
+| # | Finding | Kind | Details |
+|---|---------|------|---------|
+| 1 | <description> | Defect / Missing Test | <file:line + what to fix> |
 | ... | ... | ... | ... |
 EOF
 ```
@@ -322,19 +380,19 @@ The addresser will fix issues, run tests, commit, push, and return a summary.
 
 The addresser has pushed fixes. Check convergence and the escalation limit, then continue.
 
-**Do not run a redundant clean-confirmation round.** If the previous round was genuinely clean — exit condition 1: reviewers submitted zero findings (not merely zero ACCEPTED findings, which is the rejected-only case handled below) — and the only changes since were trivial/mechanical (no new logic), do NOT re-invoke reviewers just to confirm cleanliness — that is a wasted round. Proceed to Phase 4.5. Only re-invoke a reviewer when a substantive change was made after the clean round.
+**Do not run a redundant clean-confirmation round.** If the previous round was genuinely clean — exit condition 1: reviewers submitted zero findings (not merely zero ACCEPTED findings, which is the rejected-only case handled below) — and the only changes since were trivial/mechanical (no new logic), do NOT re-invoke reviewers just to confirm cleanliness — that is a wasted round. Proceed to Phase 5. Only re-invoke a reviewer when a substantive change was made after the clean round.
 
-0. **Rejected-only rounds do not advance the loop.** If the referee accepted zero findings in the last round (every finding rejected as unproven / out of scope / already resolved), do NOT invoke the addresser and do NOT count it as a productive round. Post the consolidated comment (Step C already did), then either treat the loop as converged and proceed to Phase 4.5, or, if the rejections were close calls, escalate for human direction. Never send an empty findings file to the addresser.
+0. **Rejected-only rounds do not advance the loop.** If the referee accepted zero findings in the last round (every finding rejected as unproven / out of scope / already resolved), do NOT invoke the addresser and do NOT count it as a productive round. Post the consolidated comment (Step C already did), then either treat the loop as converged and proceed to Phase 5, or, if the rejections were close calls, escalate for human direction. Never send an empty findings file to the addresser.
 
 1. **Convergence audit after round 2:** After two non-clean rounds, post an audit that maps the remaining findings and review-added changes to the original acceptance criteria. For each distinct sub-problem or code area still under contention, record the finding DENSITY (how many findings have targeted that same sub-problem across rounds). A sub-problem with repeated findings across multiple rounds is a convergence trap — flag it. State whether the loop is converging and whether remaining findings primarily concern the original task or architecture introduced during addressing. If they primarily concern review-introduced architecture, stop before round 3 and request human direction. Recommend bounded simplification or removal of that architecture.
 
-2. **Convergence-recovery decision:** When the escalation exit fires (round 5 reached, convergence stalled, or a scope guard), do **not** default to stopping. Diagnose WHY the loop is not converging and choose one of three recovery paths:
+2. **Convergence-recovery decision:** When the escalation exit fires (the bound reached, convergence stalled, or a scope guard), do **not** default to stopping. Diagnose WHY the loop is not converging and choose one of three recovery paths. **None of the three resets the round count from this phase's header above** — a revised or clean attempt still draws down the same bound, never a fresh one, and discarding drifted work is a scope/branch decision, not a history rewrite that makes the bound disappear. If the bound is already exhausted, only the third path (escalate) remains available:
 
-   - **Revise-and-reset — original scope insufficiently specific.** If the reviews kept surfacing ambiguity — underspecified acceptance criteria, conflicting requirements, or findings the original issue never pinned down — the scope was the problem, not the implementation. Take the learnings from this run (what the reviews revealed about the real requirement), reset the branch to a clean head, revise the issue/requirements to be specific and unambiguous, and open a **clean PR** built on the revised issue.
-   - **Restart-clean — gone off track.** If the loop is dominated by review-introduced architecture or scope creep that drifted from the original issue, the run went off track. Start clean — discard the drifted work — and restart with **clearer guidelines** that bind the work back to the original issue scope. As part of this, update the underlying issue with notes that give clearer instructions — even a partial clarification (an added constraint, a boundary, a worked example, or an explicit "out of scope" note) materially increases the odds the next attempt succeeds and does not require a full revision.
-   - **Escalate to the user.** If the stall is a genuinely hard ambiguity that self-revision cannot resolve, or the user should choose between the paths, escalate. This remains a valid option — self-recovery is not mandatory.
+   - **Revise-and-reset — original scope insufficiently specific.** If the reviews kept surfacing ambiguity — underspecified acceptance criteria, conflicting requirements, or findings the original issue never pinned down — the scope was the problem, not the implementation. Take the learnings from this run (what the reviews revealed about the real requirement), reset the branch to a clean head, revise the issue/requirements to be specific and unambiguous, and open a **clean PR** built on the revised issue — only when the bound still has room; otherwise escalate instead.
+   - **Restart-clean — gone off track.** If the loop is dominated by review-introduced architecture or scope creep that drifted from the original issue, the run went off track. Start clean — discard the drifted work — and restart with **clearer guidelines** that bind the work back to the original issue scope, only when the bound still has room; otherwise escalate instead. As part of this, update the underlying issue with notes that give clearer instructions — even a partial clarification (an added constraint, a boundary, a worked example, or an explicit "out of scope" note) materially increases the odds the next attempt succeeds and does not require a full revision.
+   - **Escalate to the user.** If the stall is a genuinely hard ambiguity that self-revision cannot resolve, the bound is already exhausted, or the user should choose between the paths, escalate. This remains a valid option — self-recovery is not mandatory.
 
-   Do **not** extend the SAME loop past round 5 without explicit user authorization; recovery means starting a NEW loop (revised or clean), not continuing the stalled one. If you escalate, post the escalation comment and stop:
+   Do **not** extend the SAME loop, nor start a revised or clean one, past the bound without explicit user authorization; a reset or restart continues counting against that same bound, it does not grant a new one. If you escalate, post the escalation comment and stop:
 
 ```
 gh pr comment <number> --body "$(cat <<'EOF'
@@ -354,123 +412,38 @@ Then stop and inform the user directly.
 
 3. **Continue:** Re-fetch the changed-files summary and the latest address commit's delta, increment the round counter, and return to Step A. Continue autonomously unless the convergence audit requires human direction or another scope guard fires.
 
-### Phase 4.5: Docs Compliance Gate
+### Phase 5: Verification
 
-The docs-gate contract is this exact state graph:
-
-<!-- lifecycle-docs-gate:v1
-pending + review-docs -> reviewed
-reviewed + zero-actionable -> clean
-reviewed + actionable -> addressing
-addressing + address-complete -> addressed
-addressed + review-docs -> reviewed
-reviewed + convergence-escalation -> escalated
-addressed + convergence-escalation -> escalated
-clean + enter-verification -> verification
--->
-
-Only `clean` may transition to verification. `addressed` must transition through another `review-docs` round; convergence escalation exits to `escalated`, not verification.
-
-After the code review/address loop converges, run the docs curation gate. **This gate is mandatory for any PR with a docs-relevant surface** — a change to public-facing behavior (new CLI command, changed default, public API, plugin surface, config option), a change that restructures internals with observable effects, or any change to documentation files. The docs reviewer is a curator, not a diff checker — it proactively identifies where documentation is missing, outdated, or contradicted by the code changes. A PR that adds a new CLI command, changes a default, or restructures internals may need docs updates even though no `.md` files were touched. **The gate may be skipped only for a pure internal/mechanical change with no observable or documented surface** (e.g. a private refactor with no behavior change and no docs files touched).
-
-**Do NOT include `review-docs` in the Phase 4 reviewer pool.** It runs only here, after the code review loop is complete — this is the single docs owner for the lifecycle. **Do NOT skip this phase** just because the file list shows no `.md` files; judge docs-relevance by the observable surface, not the file list. When in doubt, run it — it is cheap and it catches real stale-docs gaps.
-
-#### Step A: Invoke Docs Reviewer
-
-```
-Payload: Review PR #<pr-number> for documentation compliance, round <round-number>
-```
-
-The docs reviewer fetches PR context, maps code changes to existing documentation, and identifies gaps — not just inaccuracies in changed docs, but missing docs for new behavior and stale docs contradicted by code changes. It returns findings to you and posts nothing itself; you remain the sole publisher.
-
-#### Step B: Referee Evaluation
-
-Apply the same concern-validity, remedy-proportionality, scope, and accept/reject evaluation as Phase 4. Read the relevant docs and code yourself.
-
-| Decision | When to use | Effect |
-|----------|-------------|--------|
-| **Accept** (default) | The concern is concrete and a smallest in-scope docs correction is available | Include only that proportional correction in the addresser action plan |
-| **Reject** | The concern is unproven, already resolved, out of scope, or disproportionate for this PR | Exclude it; record whether the concern itself was valid and optionally open a follow-up issue |
-
-**If zero findings survive filtering**, still post the consolidated comment from Step C so the docs reviewer's raw findings and your reasoning stay on the record, ending it with `**Result:** no actionable findings — proceeding to verification.` Then skip to Phase 5.
-
-#### Step C: Post the Consolidated Review & Invoke Addresser
-
-Publish **one** comment per round carrying the docs reviewer's findings and your referee decisions:
-
-```
-gh pr comment <number> --body "$(cat <<'EOF'
-## Docs Compliance Gate Round <N> — Consolidated Review & Referee Decisions
-
-### Reviewer Findings
-
-<the docs reviewer's returned findings, verbatim under its Action Required / Recommended / Minor headings>
-
-### Referee Decisions
-
-| # | Finding | Reviewer Severity | Concern | Decision | Reasoning / smallest remedy |
-|---|---------|-------------------|---------|----------|-----------------------------|
-| 1 | <brief description> | Action Required / Recommended / Minor | Valid / Unproven | Accept / Reject | <why and, if accepted, the bounded correction> |
-| ... | ... | ... | ... | ... | ... |
-
-**Findings forwarded to addresser:** <count>
-EOF
-)"
-```
-
-Write findings to a temp file and invoke the addresser:
-
-```bash
-cat > <resolved-docs-findings-path> <<'EOF'
-# Docs Compliance Findings — Round <N>
-
-| # | Finding | Severity | Details |
-|---|---------|----------|---------|
-| 1 | <description> | <severity> | <file:line + what to fix> |
-| ... | ... | ... | ... |
-EOF
-```
-
-```
-Payload: <pr-number> docs-<round-number> <resolved-docs-findings-path>
-```
-
-#### Step D: Evaluate Continuation
-
-Re-invoke the docs reviewer to verify fixes. The round counter starts from round 1 (independent of Phase 4 rounds). Loop until clean. Apply the same round-2 convergence audit and convergence-based escalation (round-5 ceiling) as Phase 4.
-
-### Phase 5: Manual Verification Gate
-
-After the review loop completes, invoke the verification agent to test the PR's changes with real-world execution before merging:
+After the review loop converges, invoke the verification agent to test the PR's changes with real-world execution before merging. This phase owns lane execution and evidence preservation for the exact candidate — it does not run a multi-round findings loop.
 
 ```
 Payload: <pr-number>
 ```
 
-The verification agent will classify the change type, devise a verification plan, execute it, and report structured evidence. If **PASS** or **N/A**, proceed to Phase 6. If the verdict is **FAIL**, delegate the fixes — do **not** fix the code yourself. If it is **PARTIAL** because the target repository has no authoritative verification contract, stop and report that missing contract; do not merge or invent a substitute.
+The verification agent will classify the change type, devise a verification plan, execute it, and report structured evidence. If **PASS** or **N/A**, proceed to Phase 6. If it is **PARTIAL** because the target repository has no authoritative verification contract, stop and report that missing contract; do not merge or invent a substitute.
 
 Capture the verifier's returned handoff-artifact JSON object: the complete durable `verification-record:v1` (exact command or ordered JSON plan, execution count, overall status, and ordered per-command result/status/evidence-pointer entries) plus its `suite-evidence` object. Confirm every `#/suite-evidence/command-<N>` pointer resolves inside that object to the matching exact command and complete unedited output. Write the whole object byte-for-byte to a harness-provided temporary file, or a uniquely created file under the operating system's temporary directory when the harness provides none, and pass the resolved path explicitly to `merge-pr`. The verifier publishes only the matching concise canonical record in its PR comment; `suite-evidence` remains in the temporary handoff and is never posted as persistent output. If the returned object is absent, malformed, or has a dangling or mismatched pointer, stop rather than reconstructing it from the parent transcript.
 
-Because `implement-address` reads its findings from a file argument (and aborts if that file is missing or empty), you must **write the verification findings to a temp file first**, reusing the findings-file mechanics of Phase 4 Step C/D (write a temp findings file, then invoke `implement-address` with its path). Unlike Phase 4, there is no referee accept/reject step here: `verify` is a single, self-vetting source rather than several parallel reviewers who can disagree, so its findings pass straight through. The `verify` skill only posts a PR comment; it does not write this file, so the orchestrator must create it:
+If the verdict is **FAIL**, it names a genuine defect reachable in the running system — fix it in the branch under review rather than deferring it to a follow-up PR. Because `implement-address` reads its findings from a file argument (and aborts if that file is missing or empty), write the verification findings to a temp file first; `verify` only posts a PR comment, it does not write this file, so the orchestrator must create it:
 
 ```bash
 cat > <resolved-verify-findings-path> <<'EOF'
-# Verification Findings — Round <N>
+# Verification Findings
 
-| # | Finding | Severity | Details |
-|---|---------|----------|---------|
-| 1 | <what failed> | Action Required | <expected vs. actual, file:line if known, how to fix> |
+| # | Finding | Kind | Details |
+|---|---------|------|---------|
+| 1 | <what failed> | Defect | <expected vs. actual, file:line if known, how to fix> |
 | ... | ... | ... | ... |
 EOF
 ```
 
-Then invoke the addresser with that file path, using a `verify-<round-number>` round token (analogous to Phase 4.5's `docs-<N>`):
+Invoke the addresser once with that file path:
 
 ```
-Payload: <pr-number> verify-<round-number> <resolved-verify-findings-path>
+Payload: <pr-number> verify-1 <resolved-verify-findings-path>
 ```
 
-The round counter starts from round 1 (independent of Phase 4 rounds) and increments each FAIL → address → re-verify cycle. After the addresser pushes fixes, re-invoke `verify` and repeat until **PASS** or **N/A**, then proceed to Phase 6.
+After the addresser pushes fixes, re-invoke `verify` exactly once against the new head. If that second verification is **PASS** or **N/A**, proceed to Phase 6. If it is not, stop this phase and escalate to the user directly rather than cycling further — do not fix the code yourself and do not invoke another addressing or verification attempt without explicit user authorization.
 
 ### Phase 6: Merge & Finalize
 

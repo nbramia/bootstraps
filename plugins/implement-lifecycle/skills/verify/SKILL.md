@@ -29,6 +29,39 @@ If the current client leaves `$ARGUMENTS` literal, use the delegation prompt ins
 
 At runtime, parse the PR number and fetch its metadata, comments, and changed-file summary.
 
+Read the target repository's `docs/specs/standards/development-lifecycle.md`
+when present, alongside `AGENTS.md`, `CLAUDE.md`, and applicable testing
+standards. The repository contract defines the authoritative lane/evidence
+policy; this skill owns execution mechanics only and must not invent a broad
+command when the repository has not established one.
+
+If that repository documents a shared development-metrics recorder (e.g.
+`scripts/development_metrics.py`), capture a real start timestamp through its
+own mechanism (e.g. its `now` subcommand) at the beginning of this phase, then
+at the end record it through the same recorder (e.g. its `record` subcommand)
+passing that captured start value (e.g. `--started-monotonic`) rather than a
+hand-computed or estimated duration — the recorder itself measures real
+elapsed monotonic time between the two calls; never invent, guess, or
+shell-arithmetic an elapsed duration yourself. Use opaque candidate/task ids,
+phase `verify`, phase-kind `execution`, the lane/suite actually run, worker
+count, the real result and exit status (preserved exactly, never inferred
+from a friendly label), and any run id passed to this invocation, so this
+phase's record joins the same run as every other delegated phase. Best-effort
+only: never let a missing recorder or a failed metrics call change this
+phase's real result, and never invent a second timing or telemetry format.
+If a real phase-start timestamp was not captured, make at most one final
+recorder call without a duration flag so its `elapsed_seconds: null`
+truthfully preserves unknown timing. Never truncate, replace, overwrite, or
+append a duplicate receipt for the same phase attempt just to supply a
+duration later; retain the incomplete record and report the recorder problem
+separately. For `--evidence-ref`, use a recorder-valid opaque token (for
+example `verify-pr42-command1`), never a JSON Pointer such as
+`#/suite-evidence/command-1`; keep that pointer in the verification artifact
+and state the token-to-pointer mapping there. When a standards-only decision
+has no authoritative subprocess status, omit `--exit-status` so the record
+preserves `exit_status: null`; never manufacture zero or a failure status from
+a PASS/FAIL label alone.
+
 ## Instructions
 
 You are the **verification agent** for the implementation lifecycle. Unit tests verify individual functions work. Code review catches logic and style issues. Your job is different — you verify that **the system actually works as a user would experience it** after these changes. You think holistically: does the feature work end-to-end? Did it break anything upstream or downstream? Does the system still behave correctly as a whole?
@@ -37,7 +70,13 @@ You are the last line of defense before merge. Be thorough.
 
 First establish the target repository's authoritative verification contract. Apply repository instructions first, then CI configuration, documented development commands, and build or test configuration. Use an explicit command when the repository declares one. When it declares several required commands, preserve their order as one authoritative plan; do not select a subset or reorder them. Do not derive this contract from the plugin's source repository, invent a replacement, or silently promote a focused command. If these sources do not establish an authoritative command or plan, report the missing contract explicitly and return PARTIAL without executing a guessed substitute.
 
-For a code-changing PR, obtain the exact current head with `gh pr view <number> --json headRefOid --jq .headRefOid`. Any complete authoritative evidence record for that identical SHA consumes its one-execution allowance, whether the recorded result passed or failed. A complete record has the exact command or ordered plan, an execution count of one, the original overall exit status, and the corresponding `pass`/zero-status or `fail`/nonzero-status result. Independently establish the target contract before consuming evidence, and consume a complete passing record only when its command or plan exactly matches. Do not execute it again. For a complete failing record, return FAIL and require addressing that produces a new head before another authoritative execution. Evidence for any other SHA is stale. If no complete evidence exists for the exact head, execute the established command or ordered plan exactly once and preserve each command's output plus the plan's original exit status; stop the plan at the first failure unless the target repository explicitly requires otherwise. Never rerun it to uncache results, filter output, recover status, count packages, or improve formatting. A pure documentation change may record verification as not required.
+For a code-changing PR, obtain the exact current head with `gh pr view <number> --json headRefOid --jq .headRefOid`. Independently establish the target contract before consuming any evidence.
+
+If the target repository documents a shared verification-evidence adapter (e.g. `scripts/verification_evidence.py`'s `EvidenceStore`, keyed on exact content/lane/runner/dependency/environment fingerprints rather than the SHA alone), this skill bridges that adapter to the stable record format below rather than reimplementing reuse logic itself or inventing a second one. The adapter preserves every attempt for the exact same candidate as additive history — never truncate, replace, or otherwise discard a prior attempt — and only reports a receipt reusable when the LATEST attempt is a genuine pass covering every expected lane at exit status 0; a stale or input-mismatched receipt, or one whose latest attempt is any non-success (including cancelled or incomplete), is never treated as reusable. Consume a reusable receipt only when its command/lane scope exactly matches the established contract. When the latest attempt was an **infrastructure failure** (not a real code defect — e.g. network, environment, or resource exhaustion), a fresh attempt against the exact SAME candidate is permitted, but only when you give the repository's own mechanism for recording why (per its documentation) a concrete, specific reason — never retry silently, and never fabricate a reason to unblock reuse. When the latest attempt was a **genuine code failure**, do not retry the same candidate: report FAIL and require addressing to produce a new head before another authoritative execution.
+
+When the target repository has no such documented adapter, fall back to this simpler generic rule: any complete authoritative evidence record for the exact current head consumes its one-execution allowance, UNLESS it is explicitly an infrastructure failure recorded with a stated reason, in which case one same-head retry is permitted — record that reason in your PR comment and the handoff artifact's `retry-reason` field; never retry without one. A complete record has the exact command or ordered plan, an execution count of one, the original overall exit status, and the corresponding `pass`/zero-status or `fail`/nonzero-status result. A genuine (non-infrastructure) failing record still requires addressing to produce a new head before another authoritative execution — do not execute it again. Evidence for any other SHA is stale.
+
+If no complete evidence exists for the exact head (or the available receipt was correctly rejected as unreusable above), execute the established command or ordered plan exactly once and preserve each command's output plus the plan's original exit status; stop the plan at the first failure unless the target repository explicitly requires otherwise. Never rerun it to uncache results, filter output, recover status, count packages, or improve formatting. A pure documentation change may record verification as not required.
 
 Record suite evidence as a canonical `verification-record:v1` in both the returned result and PR comment using these exact fields:
 
@@ -49,13 +88,14 @@ suite-command: <exact-command-or-ordered-JSON-command-array> | none
 suite-executions: 0 | 1
 suite-exit-status: <integer> | n/a
 suite-command-results: <ordered-result-list> | []
+retry-reason: <the exact reason recorded for a same-candidate infrastructure retry> | none
 ```
 
-For an ordered plan, follow those fields with a `suite-command-results` list that records each command actually executed, in order, with its exact command, `pass`/`fail` result, original exit status, and a JSON Pointer of the form `#/suite-evidence/command-<N>`. A passing plan must contain evidence for every declared command. A failing plan records the commands reached through the failure; unexecuted trailing commands remain part of `suite-command` but must not be represented as executed. For a single command, use the same one-entry list so the durable representation does not change shape.
+For an ordered plan, follow those fields with a `suite-command-results` list that records each command actually executed, in order, with its exact command, `pass`/`fail` result, original exit status, and a JSON Pointer of the form `#/suite-evidence/command-<N>`. A passing plan must contain evidence for every declared command. A failing plan records the commands reached through the failure; unexecuted trailing commands remain part of `suite-command` but must not be represented as executed. For a single command, use the same one-entry list so the durable representation does not change shape. `retry-reason` is `none` unless this exact execution is a same-candidate infrastructure retry (see below); it is informational provenance for merge-pr and a human reader, never a separate readiness gate.
 
 The returned result must also contain one temporary handoff-artifact JSON object. It preserves the canonical record semantically and adds a `suite-evidence` object: comment values `suite-command: none` and `suite-exit-status: n/a` serialize as JSON `null`, while `suite-command-results` remains an ordered JSON array of structured result objects. Each result's pointer must resolve under that same artifact's `suite-evidence` object to an entry whose `command` exactly matches its result entry and whose `output` contains that command's complete, unedited output. The PR comment includes the canonical fields and pointers but omits `suite-evidence`, keeping verbose output out of persistent storage. The lifecycle orchestrator writes the returned handoff-artifact object byte-for-byte to a temporary file and passes that file to the fresh merger; do not point at headings, the parent transcript, or any artifact that is not included in that explicit handoff.
 
-The missing-contract/PARTIAL record is canonical: `suite-result: missing-contract`, `suite-command: none`, `suite-executions: 0`, `suite-exit-status: n/a`, and an empty `suite-command-results` list. This state is not mergeable. A documentation-only N/A record uses the same command, execution, status, and empty-results values with `suite-result: not-required`.
+The missing-contract/PARTIAL record is canonical: `suite-result: missing-contract`, `suite-command: none`, `suite-executions: 0`, `suite-exit-status: n/a`, an empty `suite-command-results` list, and `retry-reason: none`. This state is not mergeable. A documentation-only N/A record uses the same command, execution, status, results, and retry-reason values with `suite-result: not-required`.
 
 After execution, fetch `headRefOid` again. If it differs from `verification-head`, report FAIL and do not claim evidence for the new head. A subsequent verification attempt may run once for that new exact commit.
 
@@ -190,9 +230,10 @@ suite-command-results:
     result: pass | fail
     exit-status: <integer>
     evidence-pointer: "#/suite-evidence/command-<N>"
+retry-reason: <reason> | none
 
 handoff-artifact:
-  {"verification-record":"v1",...,"suite-evidence":{"command-<N>":{"command":"<exact-command>","output":"<complete-unedited-output>"}}}
+  {"verification-record":"v1",...,"retry-reason":null,"suite-evidence":{"command-<N>":{"command":"<exact-command>","output":"<complete-unedited-output>"}}}
 
 ### System Flow Verified
 <brief description of the end-to-end flow that was exercised>
@@ -265,9 +306,10 @@ suite-command: none
 suite-executions: 0
 suite-exit-status: n/a
 suite-command-results: []
+retry-reason: none
 
 handoff-artifact:
-  {"verification-record":"v1","verification-head":"<full-head-sha>","suite-result":"not-required","suite-command":null,"suite-executions":0,"suite-exit-status":null,"suite-command-results":[],"suite-evidence":{}}
+  {"verification-record":"v1","verification-head":"<full-head-sha>","suite-result":"not-required","suite-command":null,"suite-executions":0,"suite-exit-status":null,"suite-command-results":[],"retry-reason":null,"suite-evidence":{}}
 
 Pure documentation change — no code, configuration, or build artifacts affected.
 ```

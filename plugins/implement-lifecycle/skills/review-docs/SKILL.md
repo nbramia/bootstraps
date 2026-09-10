@@ -78,11 +78,15 @@ Only flag ADR triggers when the change is genuinely architectural. Do not flag r
 
 ## Finding Contract
 
-Every finding must name a concrete reader-facing error or omission and the acceptance criterion, documented invariant, or existing behavior it contradicts. Suggest the smallest documentation correction within the PR's original scope; the referee may accept the concern without accepting your remedy. Do not use documentation review to introduce a new architecture, public interface, or unrelated documentation project.
+A finding is exactly one of two kinds:
+- **Defect** — a concrete reader-facing error or omission reachable by a reader or user who consults the docs or the new surface: it contradicts, or fails to document, the acceptance criterion, documented invariant, or existing behavior the change affects.
+- **Missing test** — rare for documentation; use only when the project has an automated documentation check (e.g. a link checker, a frontmatter schema) the change should satisfy but does not exercise.
 
-Use **Recommended** only for concrete, in-scope gaps fixable without a new abstraction. Minor observations must not be framed as reasons to continue the review loop.
+Suggest the smallest documentation correction within the PR's original scope; the referee may accept the concern without accepting your remedy. Do not use documentation review to introduce a new architecture, public interface, or unrelated documentation project.
 
-**Reconcile docs the PR touches — don't leave anchors for the next PR.** When a PR changes docs that still say "missing", "absent", "not yet implemented", or "TODO" about behavior this PR implements or removes, flag it so the PR reconciles its own docs rather than leaving a stale anchor for the next PR's docs gate to catch. Each PR should leave the docs it touches accurate at its own merge.
+An observation that is neither kind — a stylistic preference for how a sentence is phrased, an ADR suggestion with no anchoring project standard, or a wording complaint about a comment, docstring, or PR description — is not a finding. Drop it silently rather than reporting it at a lower severity.
+
+**Reconcile docs the PR touches — don't leave anchors for the next PR.** When a PR changes docs that still say "missing", "absent", "not yet implemented", or "TODO" about behavior this PR implements or removes, flag it as a Defect so the PR reconciles its own docs rather than leaving a stale anchor for a later change to catch. Each PR should leave the docs it touches accurate at its own merge.
 
 ## Round Context
 
@@ -100,6 +104,8 @@ Do not expand later rounds into speculative documentation work unrelated to the 
 - **Treating docs as a changelog** — Documentation describes current behavior, not a history of changes. Do not demand changelog-style entries unless the project explicitly maintains one.
 - **Scope creep** — Review only documentation affected by the PR's changes. Do not audit the entire docs directory or flag pre-existing issues.
 - **False ADR triggers** — Routine feature additions that follow existing patterns do not need ADRs. Only flag genuinely architectural decisions that set new precedents.
+- **Prose wording** — Don't report how a sentence is phrased as a finding; report only an error, omission, or contradiction a reader would actually hit.
+- **Tooling status as a finding** — Don't report your own inability to execute a command as a finding; record it under Status.
 
 ## Output
 
@@ -107,16 +113,16 @@ Do not expand later rounds into speculative documentation work unrelated to the 
 
 Return findings to the orchestrator as your final message, in exactly this structure:
 
-### Action Required
-- **[Docs]** Description with specific file:line and documentation concern
+### Defects
+- **[Docs]** Description with specific file:line, what a reader would hit, and the documentation concern
 
-### Recommended
-- **[Docs]** Description with specific file:line and what would be better
+### Missing Tests
+- **[Docs]** Description of the automated documentation check the change should satisfy, with specific file:line references
 
-### Minor
-- **[Docs]** Description with specific file:line references
+### Status
+<whether you executed any of the project's documentation checks, and if not, why — never a finding>
 
 ### Summary
 <1-2 sentence assessment focused on documentation accuracy and compliance>
 
-Return all four headings. Write `None.` beneath every empty category. If documentation is accurate and complete, say so explicitly in Summary.
+Return all four headings. Write `None.` beneath Defects and Missing Tests when empty. If documentation is accurate and complete, say so explicitly in Summary.

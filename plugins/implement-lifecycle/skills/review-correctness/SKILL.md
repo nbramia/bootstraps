@@ -57,9 +57,13 @@ Review in light of that guidance. If you raise a convention-based finding, tie i
 
 ## Finding Contract
 
-Every finding must name a concrete failure scenario and the acceptance criterion, documented invariant, or existing behavior it violates. Include enough evidence to reproduce or trace the failure. Suggest the smallest correction within the PR's original scope; the referee may accept the concern without accepting your remedy. Do not propose a new dependency, executable subsystem, public interface, persistence mechanism, or architectural layer unless the original issue requires it.
+A finding is exactly one of two kinds:
+- **Defect** — a concrete failure scenario reachable on a path a caller or user actually takes, and the acceptance criterion, documented invariant, or existing behavior it violates.
+- **Missing test** — the change claims behavior on an execution path you traced that no existing test pins.
 
-Use **Recommended** only for concrete, in-scope problems fixable without a new abstraction. Minor observations must not be framed as reasons to continue the review loop.
+Include enough evidence to reproduce or trace the failure. Suggest the smallest correction within the PR's original scope; the referee may accept the concern without accepting your remedy. Do not propose a new dependency, executable subsystem, public interface, persistence mechanism, or architectural layer unless the original issue requires it.
+
+An observation that is neither kind — a theoretical concern with no reachable path, a style preference, or the wording of a comment or docstring — is not a finding. Drop it silently rather than reporting it at a lower severity.
 
 ## Round Context
 
@@ -82,6 +86,8 @@ Do not expand later rounds into speculative hardening of surfaces unrelated to t
 - **Scope creep** — Don't suggest refactoring unrelated code. Focus on correctness of the changes.
 - **False positives** — Don't report theoretical concerns that can't actually happen given the code's constraints. Every finding should be actionable.
 - **Standardless convention findings** — Don't call something "wrong" because of personal preference. Anchor convention findings in project guidance or established module patterns.
+- **Prose wording** — Don't report the wording of a comment or docstring as a finding.
+- **Tooling status as a finding** — Don't report your own inability to execute a command as a finding; record it under Status.
 
 ## Output
 
@@ -89,16 +95,16 @@ Do not expand later rounds into speculative hardening of surfaces unrelated to t
 
 Return findings to the orchestrator as your final message, in exactly this structure:
 
-### Action Required
-- **[Correctness]** Description with specific file:line references and explanation of the bug/risk
+### Defects
+- **[Correctness]** Description with specific file:line references, the path that reaches it, and explanation of the bug/risk
 
-### Recommended
-- **[Correctness]** Description with specific file:line references
+### Missing Tests
+- **[Correctness]** Description of the claimed behavior with specific file:line references and why no existing test pins it
 
-### Minor
-- **[Correctness]** Description with specific file:line references
+### Status
+<whether you executed the PR's focused tests/build, and if not, why — never a finding>
 
 ### Summary
 <1-2 sentence assessment focused on correctness>
 
-Return all four headings. Write `None.` beneath every empty category. If the code is correct, say so explicitly in Summary.
+Return all four headings. Write `None.` beneath Defects and Missing Tests when empty. If the code is correct, say so explicitly in Summary.
