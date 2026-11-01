@@ -24,7 +24,7 @@
       "name": "implement-lifecycle",
       "source": "./plugins/implement-lifecycle",
       "description": "Cross-client implementation lifecycle with adversarial PR review — plan, implement, PR, review/address loop, verify, merge",
-      "version": "3.10.18",
+      "version": "3.10.19",
       "category": "productivity",
       "tags": ["implement", "review", "pr", "lifecycle", "adversarial", "tdd", "merge"],
       "author": {
@@ -84,7 +84,7 @@
       "name": "implement-team",
       "source": "./plugins/implement-team",
       "description": "DEPRECATED — use implement-lifecycle instead. Implementation lifecycle re-architected around Claude Code agent-teams — long-lived implementer and reviewer teammates with shared task list and mailbox messaging",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "category": "productivity",
       "tags": ["agent-teams", "implement", "review", "lifecycle", "collaboration", "experimental", "deprecated"],
       "author": {

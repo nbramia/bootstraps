@@ -24,7 +24,7 @@ gh pr view <pr-number> --comments
 
 Before reviewing, understand the project's documentation standards. Search for and read:
 - `AGENTS.md` — Development principles, documentation requirements, structural conventions
-- `CLAUDE.md` — Project-specific conventions and constraints
+- `AGENTS.md` / `CLAUDE.md` — Project-specific conventions and constraints
 - Documentation in `docs/` — existing docs structure, frontmatter patterns, naming conventions, ADR templates
 
 Do NOT hardcode any project-specific rules. Derive all standards from what you find in the project itself. If the project has no documentation standards, limit your review to accuracy and consistency with existing docs.

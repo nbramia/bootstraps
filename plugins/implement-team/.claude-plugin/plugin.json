@@ -1,7 +1,7 @@
 {
   "name": "implement-team",
   "description": "DEPRECATED — use implement-lifecycle instead. Implementation lifecycle re-architected around Claude Code agent-teams — long-lived implementer and reviewer teammates with shared task list and mailbox messaging",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": {
     "name": "benjamcalvin"
   },

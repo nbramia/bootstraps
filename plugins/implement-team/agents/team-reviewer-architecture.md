@@ -24,7 +24,7 @@ gh pr view <pr-number> --comments
 
 Before reviewing, understand the project's architectural context. Search for and read:
 - `AGENTS.md` — Development principles, module boundaries, critical invariants
-- `CLAUDE.md` — Project-specific conventions and constraints
+- `AGENTS.md` / `CLAUDE.md` — Project-specific conventions and constraints
 - Architecture docs in `docs/` (architecture decision records, system design, module maps)
 - Existing code in the affected modules — understand the patterns already established
 
