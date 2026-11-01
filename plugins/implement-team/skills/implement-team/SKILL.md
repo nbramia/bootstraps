@@ -10,7 +10,7 @@ description: >-
 argument-hint: <#issue | PR-number | freeform task> [instructions]
 license: MIT
 metadata:
-  version: "0.5.0"
+  version: "0.5.1"
   tags: ["implement", "lifecycle", "review", "agent-teams", "experimental", "deprecated"]
   author: benjamcalvin
 ---
