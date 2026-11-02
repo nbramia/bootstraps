@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Codex manifest and marketplace validation in `validate-all.sh`
 - Pi package metadata and installation guidance for `implement-lifecycle`; Pi users can discover its shared skills and delegate through their separately installed `pi-subagents`
+- `tools/ship`: the `ship` and `ship-notice` commands, their tests, an installer and a sample `ship.conf`
 
 ### Changed
 
@@ -18,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `implement-lifecycle` 3.9.2 now delegates every heavy phase through generic isolated subagents that explicitly invoke the canonical worker skills, removing the distributed Claude Code worker templates
 - `implement-lifecycle` 3.10.0 defines its phase-to-skill mapping once and applies it through Claude Code, Codex, Pi, and generic isolated-delegation adapters
 - `implement-lifecycle` 3.10.19 and `implement-team` 0.5.1 reviewers read `AGENTS.md` as well as `CLAUDE.md` for project conventions
+- The repository is canonical at `nbramia/bootstraps`: install commands and the marketplace owner point there, and installing needs no private-repo access or `GITHUB_TOKEN`
+
+## implement-lifecycle [4.0.0] - 2026-11-02
+
+### Changed
+
+- **BREAKING:** `implement` is a short orchestration skill: build in a subagent, have another model family try to break the change, judge the findings, record them on the PR, verify for real, and land with `ship`
+- `validate-all.sh` checks the one remaining skill, its Codex metadata and its Pi package
+
+### Removed
+
+- **BREAKING:** the `review-architecture`, `review-correctness`, `review-docs`, `review-general`, `review-security`, `review-testing`, `implement-code`, `implement-address`, `verify`, `merge-pr` and `pr-check` skills, and the lifecycle suite capability declarations
 
 ## implement-team [0.5.0] - 2026-07-26
 

@@ -1,6 +1,0 @@
-interface:
-  display_name: "Review Architecture"
-  short_description: "Architecture-focused pull request review"
-  default_prompt: "Use $implement-lifecycle:review-architecture to inspect this PR for structural and design risks."
-policy:
-  allow_implicit_invocation: false

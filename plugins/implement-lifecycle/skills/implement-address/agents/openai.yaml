@@ -1,6 +1,0 @@
-interface:
-  display_name: "Address Review Findings"
-  short_description: "Apply accepted pull request review findings"
-  default_prompt: "Use $implement-lifecycle:implement-address to apply the accepted findings for this review round."
-policy:
-  allow_implicit_invocation: false

@@ -1,6 +1,0 @@
-interface:
-  display_name: "Implement Code"
-  short_description: "Implement code and create a pull request"
-  default_prompt: "Use $implement-lifecycle:implement-code to implement this delegated task and create a pull request."
-policy:
-  allow_implicit_invocation: false

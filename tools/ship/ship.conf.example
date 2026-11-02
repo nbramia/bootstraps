@@ -1,0 +1,9 @@
+# ship per-repo overrides: owner/repo key=value
+#   deploy=Name A|Name B    deploys to watch, by workflow name or file, Deployments
+#                           environment, commit status context or check run name
+#   deploy=none             repo has no deploy to watch
+#   advisory=Name A|Name B  checks whose red does not stop the run; shown in the RESULT
+#                           line. A required check stays required.
+example-org/web-app deploy=Deploy Production|Deploy Staging
+example-org/internal-library deploy=none
+example-org/data-pipeline advisory=Nightly Benchmarks|Coverage Report

@@ -1,6 +1,0 @@
-interface:
-  display_name: "Verify Pull Request"
-  short_description: "Verify a pull request end to end"
-  default_prompt: "Use $implement-lifecycle:verify to verify this pull request in the real running system."
-policy:
-  allow_implicit_invocation: false

@@ -1,6 +1,0 @@
-interface:
-  display_name: "Merge Pull Request"
-  short_description: "Merge using lifecycle verification evidence"
-  default_prompt: "Use $implement-lifecycle:merge-pr <pr-number> <handoff-artifact-path> for the lifecycle-internal merge step; require the temporary artifact produced by verification and fail closed without it."
-policy:
-  allow_implicit_invocation: false

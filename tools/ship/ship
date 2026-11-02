@@ -1,0 +1,1113 @@
+#!/usr/bin/env bash
+# ship: merge one PR. Pin the head, wait for checks, merge, confirm, report truthfully,
+# and leave the deploy watch running in the background.
+# Bash 3.2 compatible. No GNU-only tools. Everything prints to stdout.
+set -u
+
+EX_OK=0 EX_ERR=1 EX_USAGE=2 EX_REFUSED=3 EX_NOT_WATCHED=4 EX_HEAD_MOVED=5
+EX_CHECK_FAILED=10 EX_CHECK_CANCELLED=11 EX_CONFLICT=12 EX_BEHIND=13 EX_CHECK_MISSING=14 EX_MERGE_FAILED=15
+EX_MERGE_UNKNOWN=16 EX_DEPLOY_FAILED=20 EX_NO_DEPLOY=21 EX_DEPLOY_TIMEOUT=22 EX_TIMEOUT=30 EX_INTERRUPTED=40
+EX_ORPHANED=41 EX_DIED=42 EX_RUNNING=50
+
+usage() {
+  cat <<'EOF'
+ship <pr> [--repo o/r] [--wait-deploy] [--no-deploy-watch] [--allow-no-checks]
+ship --watch-sha <sha> [--repo o/r]
+ship --status [run-id]
+
+Pin the head SHA and wait for required checks, and stop on any reported red check.
+Squash-merge with --match-head-commit, confirm via the API, delete the remote branch, and return with the
+merge SHA while a detached process watches the deploy and records its result.
+--wait-deploy blocks on the deploy instead. Deploys are seen through workflow runs,
+GitHub Deployments, commit statuses and check runs.
+It never reruns a failed check and never uses --delete-branch.
+
+  --allow-no-checks  Merge with no checks, after the usual short wait, even if a workflow
+               should have run on this PR or its filters could not be read. Otherwise exit 14.
+  --status     Report a run by the id in its RESULT line, including its deploy. With no
+               argument, list recent ids. If it died, says at which stage and asks GitHub
+               if the merge landed. Exit: the run's own code, 4 merged with no deploy
+               watch, 16 merge state unknown (ask again), 50 still running, 42 died.
+
+Exit codes: 0 merged, deploy watched in the background (with --wait-deploy, merged and
+deployed). 1 API error, 2 usage, 3 refused (closed, draft, merged), 4 merged, deploy not
+watched, 5 head moved. 10 check failed, 11 check cancelled, 12 conflict, 13 behind base,
+14 required check never reported, 15 merge blocked or rejected, 16 merge state unknown.
+20 deploy failed, 21 no deploy started, 22 deploy watch timed out. 30 timeout before
+merge, 40 interrupted, 41 caller gone, nothing merged.
+
+ship does not wait for a running deploy, so a repo needs workflow concurrency to queue its deploys.
+
+Config: ~/Code/Sync/bin/ship.conf, lines of "owner/repo deploy=Name A|Name B" or
+"owner/repo deploy=none", naming the deploys to watch in place of automatic discovery,
+and "owner/repo advisory=Name A|Name B": checks whose red does not stop the run. It shows
+in the RESULT line. A required check cannot be advisory.
+Env (seconds): SHIP_POLL=15 SHIP_CHECK_TIMEOUT=3600 SHIP_DEPLOY_START_TIMEOUT=300
+  SHIP_DEPLOY_TIMEOUT=3600 SHIP_MISSING_GRACE=300 SHIP_CHECK_GRACE=20
+  SHIP_MERGE_CONFIRM_TIMEOUT=120 SHIP_BLOCKED_SETTLE=30 SHIP_DEPLOY_PROBE=30
+EOF
+}
+
+US=$'\037'
+PR="" REPO="" NO_WATCH=0 WAIT_DEPLOY=0 NO_CHECKS_OK=0 WATCH_SHA="" STATUS=0 TARGET="" RUN_ARG=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit "$EX_OK" ;;
+    --repo|-R) [ $# -ge 2 ] || { echo "ship: $1 needs a value"; exit "$EX_USAGE"; }; REPO=$2; shift 2 ;;
+    --no-deploy-watch) NO_WATCH=1; shift ;;
+    --wait-deploy) WAIT_DEPLOY=1; shift ;;
+    --allow-no-checks) NO_CHECKS_OK=1; shift ;;
+    --watch-sha) [ $# -ge 2 ] || { echo "ship: --watch-sha needs a value"; exit "$EX_USAGE"; }; WATCH_SHA=$2; shift 2 ;;
+    --run) RUN_ARG=$2; shift 2 ;;   # internal: the background watch appends to its run's record
+    --status) STATUS=1; shift; case "${1:-}" in ''|-*) ;; *) TARGET=$1; shift ;; esac ;;
+    -*) echo "ship: unknown option $1"; usage; exit "$EX_USAGE" ;;
+    *) [ -z "$PR" ] || { echo "ship: extra argument $1"; exit "$EX_USAGE"; }; PR=$1; shift ;;
+  esac
+done
+[ "$STATUS" = 1 ] || [ -n "$PR" ] || [ -n "$WATCH_SHA" ] || { usage; exit "$EX_USAGE"; }
+if [[ "$PR" =~ ^https://github\.com/([^/]+/[^/]+)/pull/([0-9]+) ]]; then
+  if [ -n "$REPO" ] && [ "$(printf '%s' "$REPO" | tr 'A-Z' 'a-z')" != "$(printf '%s' "${BASH_REMATCH[1]}" | tr 'A-Z' 'a-z')" ]; then
+    echo "ship: $PR is not in --repo $REPO"; exit "$EX_USAGE"
+  fi
+  REPO=${BASH_REMATCH[1]}
+  PR=${BASH_REMATCH[2]}
+fi
+[ "$STATUS" = 1 ] || [ -n "$WATCH_SHA" ] || [[ "$PR" =~ ^[0-9]+$ ]] || { echo "ship: PR must be a number or URL: $PR"; exit "$EX_USAGE"; }
+
+export GH_PROMPT_DISABLED=1 GH_PAGER=cat GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1
+
+### Run records ############################################################
+# One append-only file per run: "<epoch> <event> <text>". active/<id> flags a run that
+# may need someone told: set before the merge call, cleared by a clean end or --status.
+STATE_ROOT=${SHIP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ship}
+RUNS=$STATE_ROOT/runs
+ACTIVE=$STATE_ROOT/active
+
+rec_last() { sed -n "s/^[0-9]* $2 //p" "$1" 2>/dev/null | tail -n 1; }
+rec_alive() { # record: is its newest process still that process?
+  local l p
+  l=$(rec_last "$1" proc); p=${l%% *}
+  [ -n "$p" ] && kill -0 "$p" 2>/dev/null && [ "$(ps -o lstart= -p "$p" 2>/dev/null)" = "${l#* }" ]
+}
+# A flag clears only on a final answer. A request sent moments ago can still land.
+KEEP_FLAG=0 INFLIGHT_WINDOW=${SHIP_INFLIGHT_WINDOW:-180}
+show_run() { # record: prints what is known and returns the run's code
+  local f=$1 repo pr stage sha result deploy state at
+  repo=$(rec_last "$f" repo); pr=$(rec_last "$f" pr); stage=$(rec_last "$f" stage); sha=$(rec_last "$f" merged)
+  echo "run ${f##*/}: ${repo:-repo unknown} PR #${pr:-?}, stage $stage${sha:+, merged $sha}"
+  result=$(rec_last "$f" result); deploy=$(rec_last "$f" deploy)
+  [ -z "$result" ] || echo "${result#* }"
+  if [ -n "$deploy" ]; then echo "deploy: ${deploy#* }"; return "${deploy%% *}"; fi
+  if rec_alive "$f"; then echo "still running, in stage $stage"; KEEP_FLAG=1; return "$EX_RUNNING"; fi
+  if [ -n "$(rec_last "$f" watch)" ]; then
+    echo "DEPLOY WATCH DIED with no result. Check it: ship --watch-sha $sha --repo $repo"
+    return "$EX_DIED"
+  fi
+  # A merge request is open if none came after it: GitHub's refusal closes one.
+  at=$(awk '$2 == "stage" { if ($3 == "merging") a = $1 } $2 == "refused" { a = "" } END { print a }' "$f")
+  if [ -z "$at" ] || { [ -n "$sha" ] && [ -n "$result" ]; }; then
+    [ -z "$result" ] || return "${result%% *}"
+    echo "DIED at stage $stage with no result."
+    if [ -n "$sha" ]; then echo "PR #$pr merged as $sha. Deploy result unknown. Check it: ship --watch-sha $sha --repo $repo"
+    else echo "This run sent no merge request. Rerun if the PR is still open: ship $pr --repo $repo"; fi
+    return "$EX_DIED"
+  fi
+  [ -n "$result" ] || echo "DIED at stage $stage with no result."
+  # A merge request went out and nothing confirmed it, so only GitHub can say.
+  if ! state=$(gh api "repos/$repo/pulls/$pr" --jq '[(.merged|tostring),(.merge_commit_sha//""),.state]|join(" ")' </dev/null 2>/dev/null); then
+    echo "GitHub could not be reached, so the merge state is unknown. Check: gh pr view $pr --repo $repo"
+    KEEP_FLAG=1; return "$EX_MERGE_UNKNOWN"
+  fi
+  if [ "${state%% *}" = "true" ]; then
+    sha=$(printf '%s' "$state" | cut -d' ' -f2)
+    echo "GitHub: PR #$pr IS MERGED as $sha. Deploy result unknown. Check it: ship --watch-sha $sha --repo $repo"
+    [ -z "$result" ] || return "$EX_NOT_WATCHED"
+    return "$EX_DIED"
+  fi
+  if [ "${state##* }" = "open" ] && [ $(( $(date +%s) - at )) -lt "$INFLIGHT_WINDOW" ]; then
+    echo "GitHub: PR #$pr is not merged yet, but a merge request went out $(( $(date +%s) - at ))s ago and may still land. Ask again before rerunning."
+    KEEP_FLAG=1; return "$EX_MERGE_UNKNOWN"
+  fi
+  echo "GitHub: PR #$pr is not merged (state ${state##* }). Safe to rerun: ship $pr --repo $repo"
+  [ -z "$result" ] || return "$EX_MERGE_FAILED"
+  return "$EX_DIED"
+}
+if [ "$STATUS" = 1 ]; then
+  if [ -z "$TARGET" ]; then ls -1 "$RUNS" 2>/dev/null | sort -r | head -n 10; exit 0; fi
+  f=$RUNS/$TARGET
+  [ -f "$f" ] || { echo "ship: no run $TARGET on this machine. Recent ids: ship --status"; exit "$EX_USAGE"; }
+  show_run "$f"; code=$?
+  [ "$KEEP_FLAG" = 1 ] || rm -f "$ACTIVE/$TARGET"
+  exit "$code"
+fi
+
+POLL=${SHIP_POLL:-15}
+MISSING_GRACE=${SHIP_MISSING_GRACE:-300}
+CHECK_GRACE=${SHIP_CHECK_GRACE:-20}
+MERGE_CONFIRM_TIMEOUT=${SHIP_MERGE_CONFIRM_TIMEOUT:-120}
+BLOCKED_SETTLE=${SHIP_BLOCKED_SETTLE:-30}
+DEPLOY_PROBE=${SHIP_DEPLOY_PROBE:-30}
+GH_CALL_TIMEOUT=${SHIP_GH_CALL_TIMEOUT:-120}
+CONF=${SHIP_CONF:-$HOME/Code/Sync/bin/ship.conf}
+# The test seam freezes a run in place, so it stays away from real run records.
+if [ -n "${SHIP_TEST_HOOK:-}" ] && [ -z "${SHIP_STATE_DIR:-}" ]; then
+  echo "ship: SHIP_TEST_HOOK is not allowed with the real run records"
+  exit "$EX_USAGE"
+fi
+
+START=$(date +%s)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/ship.XXXXXX") || { echo "ship: mktemp failed"; exit "$EX_ERR"; }
+GH_ERR=$TMP/gh.err
+CALLER=$PPID
+CALLER_PARENT=$(ps -o ppid= -p "$CALLER" 2>/dev/null | tr -d ' ')
+SLEEP_PID="" LAST_STATE="" POLL_FAILS=0
+MERGE_ATTEMPTED=0 MERGE_SHA="" WATCHING=0 FINAL_DONE=0 BRANCH_NOTE="" ADVISORY_NOTE=""
+PIN="" HEAD_REF="" BASE_REF="" DEFAULT_BRANCH="" IS_CROSS="" PR_URL=""
+DEPLOY_IDS="" DEPLOY_NAMES="" DEPLOY_OFF=0 DEPLOY_OVERRIDE="" EXT_SEEN=""
+ZERO_OID=0000000000000000000000000000000000000000
+REF_MUTATION='mutation($id:ID!,$name:GitRefname!,$before:GitObjectID!,$after:GitObjectID!){updateRefs(input:{repositoryId:$id,refUpdates:[{name:$name,beforeOid:$before,afterOid:$after}]}){clientMutationId}}'
+MW=merged
+
+RUN_ID=$RUN_ARG
+[ -n "$RUN_ID" ] || RUN_ID=$(date +%Y%m%d-%H%M%S)-${PR:-sha}-$$
+REC=$RUNS/$RUN_ID
+mkdir -p "$RUNS" "$ACTIVE" || { echo "ship: cannot create $RUNS"; exit "$EX_ERR"; }
+find "$RUNS" -type f -mtime +30 -delete 2>/dev/null
+
+now() { date +%s; }
+lc() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+# Fd 3 is the real stdout. A trap can fire inside a function whose stdout is
+# redirected to a capture file, and log lines must not land there.
+exec 3>&1
+log() { local e=$(( $(now) - START )); printf '[ship %02d:%02d] %s\n' $((e / 60)) $((e % 60)) "$*" >&3; }
+state() { [ "$1" = "$LAST_STATE" ] && return 0; LAST_STATE=$1; log "$1"; }
+gh_err() { head -n 3 "$GH_ERR" 2>/dev/null | tr '\n' ' ' | cut -c1-300; }
+rec() { printf '%s %s\n' "$(now)" "$*" >>"$REC"; }
+# Test seam, off unless SHIP_TEST_HOOK is set: stops this process at a named point.
+test_point() {
+  [ -n "${SHIP_TEST_HOOK:-}" ] && [ -f "$SHIP_TEST_HOOK/$1" ] || return 0
+  rm -f "$SHIP_TEST_HOOK/$1"
+  : >"$SHIP_TEST_HOOK/$1.reached"
+  kill -STOP $$
+}
+stage() { rec stage "$1"; test_point "stage-$1"; }
+
+cleanup() {
+  [ -n "$SLEEP_PID" ] && kill "$SLEEP_PID" 2>/dev/null
+  rm -rf "$TMP"
+}
+finish() { # code message
+  [ "$FINAL_DONE" = 0 ] || exit "$1"
+  FINAL_DONE=1
+  local line="RESULT exit=$1 run=$RUN_ID: $2${ADVISORY_NOTE:+ $ADVISORY_NOTE}"
+  log "$line"
+  if [ -n "$RUN_ARG" ]; then
+    rec deploy "$1 $line"
+    case "$1" in "$EX_OK"|"$EX_NOT_WATCHED") rm -f "$ACTIVE/$RUN_ID" ;; esac
+  else
+    rec result "$1 $line"
+    # A merge request with no confirmed answer stays flagged, as does a running watch.
+    if [ "$WATCHING" = 0 ] && { [ "$MERGE_ATTEMPTED" = 0 ] || [ -n "$MERGE_SHA" ]; }; then rm -f "$ACTIVE/$RUN_ID"; fi
+  fi
+  exit "$1"
+}
+on_signal() {
+  [ "$FINAL_DONE" = 0 ] || return 0
+  # Not `trap ''`: an ignored signal stays ignored in children, and the time limit in
+  # gh_call and the deploy watcher both need to be able to receive TERM.
+  trap : INT TERM HUP
+  [ -z "$WATCH_SHA" ] || finish "$EX_INTERRUPTED" "deploy watch interrupted for $WATCH_SHA, result unknown. Check it: ship --watch-sha $WATCH_SHA --repo $REPO"
+  if [ -n "$MERGE_SHA" ]; then
+    start_watch
+    finish "$EX_INTERRUPTED" "interrupted. PR merged as $MERGE_SHA. Result of the deploy: ship --status $RUN_ID"
+  fi
+  [ "$MERGE_ATTEMPTED" = 0 ] || finish "$EX_INTERRUPTED" "interrupted. A merge was requested and not confirmed. Check it: ship --status $RUN_ID"
+  finish "$EX_INTERRUPTED" "interrupted before the merge. Nothing merged."
+}
+trap cleanup EXIT
+trap 'on_signal' INT TERM HUP
+
+nap() { sleep "$POLL" 3>&- & SLEEP_PID=$!; wait "$SLEEP_PID" 2>/dev/null; SLEEP_PID=""; }
+
+# Run gh with a hard time limit, since `timeout` does not exist on macOS.
+gh_call() {
+  local pid wd rc
+  gh "$@" 2>"$GH_ERR" </dev/null 3>&- &
+  pid=$!
+  ( s=""; trap 'kill "$s" 2>/dev/null; exit 0' TERM
+    sleep "$GH_CALL_TIMEOUT" & s=$!; wait "$s"; kill "$pid" ) >/dev/null 2>&1 3>&- &
+  wd=$!
+  wait "$pid"; rc=$?
+  kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  return "$rc"
+}
+
+poll_fail() { # what fatal_code
+  POLL_FAILS=$((POLL_FAILS + 1))
+  log "API error on $1 ($POLL_FAILS/5): $(gh_err)"
+  if [ "$POLL_FAILS" -ge 5 ]; then
+    finish "$2" "giving up after 5 straight API errors on $1"
+  fi
+}
+
+conf_get() {
+  [ -f "$CONF" ] || return 0
+  awk -v r="$(lc "$REPO")" -v k="$1" '
+    /^[[:space:]]*(#|$)/ { next }
+    tolower($1) == r {
+      line = $0
+      sub(/^[[:space:]]*[^[:space:]]+[[:space:]]+/, "", line)
+      if (index(line, k "=") == 1) v = substr(line, length(k) + 2)
+    }
+    END { if (v != "") print v }' "$CONF"
+}
+url_path() { printf '%s' "$1" | sed 's/%/%25/g; s/#/%23/g; s/&/%26/g; s/+/%2B/g; s/ /%20/g'; }   # git refs cannot hold the rest
+
+### PR state ###############################################################
+PR_QUERY='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){
+  id defaultBranchRef{name}
+  pullRequest(number:$number){state isDraft mergeable mergeStateStatus headRefOid headRefName baseRefName
+    isCrossRepository url reviewDecision mergeCommit{oid}}}}'
+PR_JQ='.data.repository as $r | $r.pullRequest as $p | [$p.state,($p.isDraft|tostring),$p.mergeable,$p.mergeStateStatus,$p.headRefOid,$p.headRefName,$p.baseRefName,($p.isCrossRepository|tostring),$p.url,($p.reviewDecision//""),($p.mergeCommit.oid//""),($r.defaultBranchRef.name//""),$r.id] | join("\u001f")'
+OWNER=""; NAME=""
+P_STATE="" P_DRAFT="" P_MERGEABLE="" P_MSS="" P_HEAD="" P_REVIEW="" P_MERGE_OID="" P_REPO_ID=""
+fetch_pr() {
+  local line
+  line=$(gh_call api graphql -f query="$PR_QUERY" -f owner="$OWNER" -f name="$NAME" -F number="$PR" --jq "$PR_JQ") || return 1
+  [ -n "$line" ] || return 1
+  IFS=$US read -r P_STATE P_DRAFT P_MERGEABLE P_MSS P_HEAD HEAD_REF BASE_REF IS_CROSS PR_URL P_REVIEW P_MERGE_OID DEFAULT_BRANCH P_REPO_ID <<<"$line"
+  return 0
+}
+
+# Returns 0 if the PR is still open at the pin, 1 if it merged while we waited.
+guard_pr() {
+  case "$P_STATE" in
+    MERGED)
+      if [ -n "$PIN" ] && [ "$P_HEAD" != "$PIN" ]; then
+        finish "$EX_HEAD_MOVED" "PR #$PR merged at ${P_HEAD:0:9}, not the pinned ${PIN:0:9}. Nothing deleted."
+      fi
+      return 1 ;;
+    CLOSED) finish "$EX_REFUSED" "PR #$PR is closed" ;;
+  esac
+  [ "$P_DRAFT" = "true" ] && finish "$EX_REFUSED" "PR #$PR is a draft"
+  if [ "$P_HEAD" != "$PIN" ]; then
+    finish "$EX_HEAD_MOVED" "PR #$PR head moved from ${PIN:0:9} to ${P_HEAD:0:9}. Refusing to merge unchecked commits. Rerun ship to pin the new head."
+  fi
+  return 0
+}
+
+### Deploy sources #########################################################
+# Automatic discovery of non-Actions deploys: a status or check run with one of
+# these in its name, or any Deployments environment that is not a preview.
+EXT_RE='deploy|vercel|netlify|railway|heroku|cloudflare|amplify|fly\.io|render\.com'
+override_has() { case "|$(lc "$DEPLOY_OVERRIDE")|" in *"|$(lc "$1")|"*) return 0 ;; esac; return 1; }
+ext_name_wanted() {
+  if [ -n "$DEPLOY_OVERRIDE" ]; then override_has "$1"; return; fi
+  case "$(lc "$1")" in *preview*) return 1 ;; esac
+  lc "$1" | grep -Eq "$EXT_RE"
+}
+env_wanted() {
+  if [ -n "$DEPLOY_OVERRIDE" ]; then override_has "$1"; return; fi
+  case "$(lc "$1")" in *preview*|*review*|pr-*|copilot*) return 1 ;; esac
+  return 0
+}
+add_ext_seen() { case ", $EXT_SEEN," in *", $1,"*) ;; *) EXT_SEEN="${EXT_SEEN:+$EXT_SEEN, }$1" ;; esac; }
+
+discover_deploys() {
+  local out id name path st match base n
+  DEPLOY_IDS="" DEPLOY_NAMES="" DEPLOY_OFF=0 EXT_SEEN=""
+  : >"$TMP/deploys"
+  DEPLOY_OVERRIDE=$(conf_get deploy)
+  if [ "$(lc "$DEPLOY_OVERRIDE")" = "none" ]; then DEPLOY_OFF=1; return 0; fi
+  out=$(gh_call workflow list --repo "$REPO" --all --limit 200 --json id,name,path,state \
+    --jq '.[] | [(.id|tostring),.name,.path,.state] | join("\u001f")') || return 1
+  while IFS=$US read -r id name path st; do
+    [ -n "$id" ] || continue
+    base=${path##*/}
+    match=0
+    if [ -n "$DEPLOY_OVERRIDE" ]; then
+      if override_has "$name" || override_has "$base"; then match=1; fi
+    else
+      case "$(lc "$name")" in *deploy*) match=1 ;; esac
+      case "$(lc "$base")" in *deploy*) match=1 ;; esac
+    fi
+    [ "$match" = 1 ] || continue
+    [ "$st" = "active" ] || continue
+    DEPLOY_IDS="${DEPLOY_IDS:+$DEPLOY_IDS,}$id"
+    DEPLOY_NAMES="${DEPLOY_NAMES:+$DEPLOY_NAMES, }$name"
+    printf '%s%s%s%s%s\n' "$id" "$US" "$name" "$US" "$path" >>"$TMP/deploys"
+  done <<<"$out"
+  # What this repo has deployed through lately. Deployments an Actions job makes through
+  # environment: are its workflow's own, and its filters govern them.
+  seen_from() { # wanted-function, then the gh arguments
+    local f=$1 n; shift
+    out=$(gh_call api "$@") || return 1
+    while IFS= read -r n; do
+      if [ -n "$n" ] && "$f" "$n"; then add_ext_seen "$n"; fi
+    done <<<"$out"
+  }
+  seen_from env_wanted "repos/$REPO/deployments?per_page=30" --jq '.[] | select(.creator.login != "github-actions[bot]") | .environment' \
+    && seen_from ext_name_wanted "repos/$REPO/commits/$DEFAULT_BRANCH/status" --jq '.statuses[].context' \
+    && seen_from ext_name_wanted "repos/$REPO/commits/$DEFAULT_BRANCH/check-runs?per_page=100" --jq '.check_runs[] | select(.app.slug != "github-actions") | .name'
+}
+# One bad answer at the start of a watch must not end it.
+discover_with_retries() {
+  local i=0
+  until discover_deploys; do
+    i=$((i + 1))
+    [ "$i" -lt 5 ] || return 1
+    sleep 3 3>&-
+  done
+}
+log_deploy_sources() {
+  [ "$DEPLOY_OFF" = 0 ] || return 0
+  log "deploy sources: workflows [$DEPLOY_NAMES], external [$EXT_SEEN]${DEPLOY_OVERRIDE:+, ship.conf [$DEPLOY_OVERRIDE]}"
+}
+
+# Prints a workflow's filters for one event: "P|I|B|X pattern" lines (paths, paths-ignore,
+# branches, branches-ignore), "N" for none, "A" if the event is absent, and "U" if it cannot
+# tell: tag filters, or YAML this simple reader does not follow.
+event_filters() { # event, with the workflow on stdin
+  awk -v E="$1" '
+    function clean(x) { gsub(/^[ \t]+|[ \t]+$/, "", x); gsub(/^["\047]|["\047]$/, "", x); return x }
+    function item(x) { if (x ~ /^[ \t]*[*&!|>]/) odd = 1; x = clean(x); if (x != "") { print kind " " x; found = 1 } }
+    function key(x) { sub(/:.*/, "", x); return clean(x) }
+    function value(x) { sub(/^[^:]*:[ \t]*/, "", x); return x }
+    { sub(/\r$/, "") }
+    # Only the on: block has to be understood. A jobs: block can hold anything.
+    /^ *\t/ { if (inon) odd = 1; else next }
+    match($0, /[ \t]#/) {
+      l = substr($0, 1, RSTART - 1); q = l
+      # A quote is open, so that was no comment.
+      if (gsub(/["\047]/, "", q) % 2 && (inon || l ~ /^["\047]?on["\047]?[ \t]*:/)) odd = 1
+      $0 = l
+    }
+    /^[ \t]*(#.*)?$/ { next }
+    /^ *<</ { if (inon) odd = 1 }
+    { match($0, /^ */); ind = RLENGTH; line = substr($0, ind + 1) }
+    ind == 0 && inon && !inev && line ~ /^- / { sub(/^- /, "", line); if (clean(line) == E) ev = 1; next }
+    ind == 0 {
+      inon = 0; inev = 0; kind = ""
+      if (key(line) == "on") {
+        seen = 1; rest = value(line)
+        if (rest == "") inon = 1
+        else if (rest ~ /^\[[^\[\]{}]*\]$/) { gsub(/[\[\],]/, " ", rest); n = split(rest, a, " "); for (i = 1; i <= n; i++) if (clean(a[i]) == E) ev = 1 }
+        else if (rest ~ /^["\047]?[a-z_]+["\047]?$/) { if (clean(rest) == E) ev = 1 }
+        else odd = 1
+      }
+      next
+    }
+    !inon { next }
+    inev && ind <= evind { inev = 0; kind = "" }
+    !inev {
+      if (line ~ /^- /) { sub(/^- /, "", line); if (clean(line) == E) ev = 1; next }
+      if (key(line) == E) {
+        inev = 1; evind = ind; ev = 1; rest = value(line)
+        if (rest != "" && rest !~ /^(null|~)$/) odd = 1
+      }
+      next
+    }
+    line ~ /^- / { if (kind != "") { sub(/^- /, "", line); item(line) } next }
+    {
+      kind = ""; k = key(line)
+      if (k == "tags" || k == "tags-ignore") odd = 1
+      if (k == "paths") kind = "P"; else if (k == "paths-ignore") kind = "I"
+      else if (k == "branches") kind = "B"; else if (k == "branches-ignore") kind = "X"; else next
+      rest = value(line)
+      if (rest ~ /^\[[^\[\]{}]*\]$/) { gsub(/^\[|\]$/, "", rest); n = split(rest, a, ","); for (i = 1; i <= n; i++) item(a[i]) }
+      else if (rest != "") odd = 1
+      saw = 1
+    }
+    END {
+      if (!seen || odd || (saw && !found)) print "U"
+      else if (!ev) print "A"
+      else if (!found) print "N"
+    }'
+}
+# Would this event start the workflow, by GitHub's rules? The last matching pattern decides
+# a name. Include lists: the branch, and any file, must be in. Ignore lists: the branch must
+# not be, and some file must not be. Changed files on stdin.
+# Exit 0 yes, 1 no, 2 cannot tell (a pattern this does not translate, or both kinds of a list).
+filters_match() { # filters-file branch
+  awk -v F="$1" -v BR="$2" '
+    function re(p) {
+      if (p ~ /[?+\[\]{}\\]/ || p ~ /\/$/ || p == "") bad = 1
+      gsub(/[.$^()|\\]/, "\\\\&", p)
+      gsub(/\*\*\//, "\001", p); gsub(/\*\*/, "\002", p); gsub(/\*/, "[^/]*", p)
+      gsub(/\001/, "(.*/)?", p); gsub(/\002/, ".*", p)
+      return "^" p "$"
+    }
+    function listed(name, K,    i, v) {
+      v = 0
+      for (i = 1; i <= n; i++) if (kind[i] == K && name ~ pat[i]) v = !neg[i]
+      return v
+    }
+    BEGIN {
+      while ((getline l < F) > 0) {
+        k = substr(l, 1, 1); h[k] = 1
+        p = substr(l, 3); n++
+        kind[n] = (k == "P" || k == "I") ? "F" : "R"
+        neg[n] = (p ~ /^!/); sub(/^!/, "", p); pat[n] = re(p)
+        if (neg[n] && (k == "I" || k == "X")) bad = 1
+      }
+      if ((("P" in h) && ("I" in h)) || (("B" in h) && ("X" in h))) bad = 1
+      paths = ("P" in h); ignore = ("I" in h)
+      r = listed(BR, "R")
+      nobranch = (("B" in h) && !r) || (("X" in h) && r)
+    }
+    {
+      any = 1; v = listed($0, "F")
+      if (paths ? v : !v) hit = 1
+    }
+    END {
+      if (bad) exit 2
+      if (nobranch) exit 1
+      if (!paths && !ignore) exit 0
+      if (!any) exit 2
+      exit !hit
+    }'
+}
+# Would this event start the workflow file? 0 yes, 1 no, 2 cannot tell, 3 event absent.
+workflow_runs() { # workflow-file event branch files
+  event_filters "$2" <"$1" >"$TMP/filters"
+  grep -q '^U' "$TMP/filters" && return 2
+  grep -q '^A' "$TMP/filters" && return 3
+  grep -q '^N' "$TMP/filters" && return 0
+  printf '%s' "$4" | filters_match "$TMP/filters" "$3"
+}
+# The path is not there, as against the ref: "No commit found for the ref" is also a 404.
+not_there() { grep -q 'Not Found (HTTP 404)' "$GH_ERR"; }
+# Should this workflow have started for the merge? Read from the merge commit, as GitHub
+# does. Cannot tell counts as yes. A deploy with no push trigger is manual, unless chained.
+MERGE_FILES="" MERGE_FILES_READ=0
+merge_starts() { # workflow path
+  local rc
+  if [ "$MERGE_FILES_READ" = 0 ]; then
+    MERGE_FILES=$(gh_call api "repos/$REPO/commits/$MERGE_SHA" --paginate --jq '.files[].filename') || return 0
+    MERGE_FILES_READ=1
+  fi
+  if ! gh_call api "repos/$REPO/contents/$(url_path "$1")?ref=$MERGE_SHA" -H 'Accept: application/vnd.github.raw' >"$TMP/wf"; then
+    # GitHub lists a deleted workflow as active for a while. Not at this commit: cannot start.
+    not_there && return 1
+    return 0
+  fi
+  workflow_runs "$TMP/wf" push "$DEFAULT_BRANCH" "$MERGE_FILES"; rc=$?
+  [ "$rc" != 3 ] || { grep -q 'workflow_run' "$TMP/wf" && return 0; return 1; }
+  [ "$rc" != 1 ]
+}
+# True only when every deploy is a workflow that this merge should not start.
+no_deploy_expected() {
+  local id name path n=0
+  [ -n "$DEPLOY_IDS" ] && [ -z "$EXT_SEEN" ] || return 1
+  while IFS=$US read -r id name path; do
+    n=$((n + 1))
+    if merge_starts "$path"; then return 1; fi
+  done <"$TMP/deploys"
+  # A name in ship.conf that is no workflow is an outside deploy, which filters do not govern.
+  [ -z "$DEPLOY_OVERRIDE" ] || [ "$(printf '%s\n' "$DEPLOY_OVERRIDE" | tr '|' '\n' | wc -l | tr -d ' ')" = "$n" ]
+}
+# Workflows this merge should have started that have no run yet, given the runs seen.
+deploys_outstanding() { # file of workflow ids with a run
+  local id name path out=""
+  while IFS=$US read -r id name path; do
+    grep -Fxq "$id" "$1" && continue
+    if merge_starts "$path"; then out="${out:+$out, }$name"; fi
+  done <"$TMP/deploys"
+  printf '%s' "$out"
+}
+
+# Writes "class<US>description<US>url" lines for the commit's non-Actions deploy
+# signals to $TMP/ext. class is active, success, failed or skipped.
+ext_signals() { # sha
+  local sha=$1 out st url id env seen="" conc name wanted=0 unwanted=0
+  : >"$TMP/ext"
+  out=$(gh_call api "repos/$REPO/deployments?sha=$sha&per_page=30" --jq '.[] | [(.id|tostring),.environment] | join("\u001f")') || return 1
+  while IFS=$US read -r id env; do
+    [ -n "$id" ] || continue
+    if ! env_wanted "$env"; then unwanted=1; continue; fi
+    wanted=1
+    case "$seen" in *"|$env|"*) continue ;; esac   # newest first; a redeploy replaces older ones
+    seen="$seen|$env|"
+    out=$(gh_call api "repos/$REPO/deployments/$id/statuses?per_page=100" \
+      --jq '(.[0] // {}) as $n | [(if $n.state == "inactive" and (any(.[]; .state == "success")) then "success" else ($n.state // "none") end),($n.log_url // $n.target_url // $n.environment_url // "")] | join("\u001f")') || return 1
+    IFS=$US read -r st url <<<"$out"
+    case "$st" in
+      success) ;;   # includes inactive after a success: it deployed, then a newer deploy replaced it
+      failure|error|inactive) st=failed ;;
+      *) st=active ;;
+    esac
+    printf '%s%s%s%s%s\n' "$st" "$US" "deployment $env" "$US" "$url" >>"$TMP/ext"
+  done <<EOT
+$out
+EOT
+  # Hosts use one status name for previews and production (Vercel: "Vercel"). If
+  # this commit only has preview deployments, its statuses are about those.
+  if [ "$unwanted" = 1 ] && [ "$wanted" = 0 ] && [ -z "$DEPLOY_OVERRIDE" ]; then return 0; fi
+  out=$(gh_call api "repos/$REPO/commits/$sha/status" --jq '.statuses[] | [.context,.state,(.target_url // "")] | join("\u001f")') || return 1
+  while IFS=$US read -r name st url; do
+    [ -n "$name" ] || continue
+    ext_name_wanted "$name" || continue
+    case "$st" in
+      success) ;;
+      pending) st=active ;;
+      *) st=failed ;;
+    esac
+    printf '%s%s%s%s%s\n' "$st" "$US" "status $name" "$US" "$url" >>"$TMP/ext"
+  done <<<"$out"
+  out=$(gh_call api "repos/$REPO/commits/$sha/check-runs?per_page=100" \
+    --jq '.check_runs[] | select(.app.slug != "github-actions") | [.name,.status,(.conclusion // "none"),(.details_url // "")] | join("\u001f")') || return 1
+  while IFS=$US read -r name st conc url; do
+    [ -n "$name" ] || continue
+    ext_name_wanted "$name" || continue
+    if [ "$st" != "completed" ]; then st=active
+    else
+      case "$conc" in
+        success) st=success ;;
+        skipped|neutral) st=skipped ;;
+        *) st=failed ;;
+      esac
+    fi
+    printf '%s%s%s%s%s\n' "$st" "$US" "check $name" "$US" "$url" >>"$TMP/ext"
+  done <<<"$out"
+  return 0
+}
+
+### Checks #################################################################
+CHECKS_QUERY='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{__typename
+  ... on CheckRun{name status conclusion detailsUrl startedAt isRequired(pullRequestNumber:$number)}
+  ... on StatusContext{context state targetUrl createdAt isRequired(pullRequestNumber:$number)}}}}}}}}}}'
+CHECKS_JQ='.data.repository.pullRequest.commits.nodes[0].commit.statusCheckRollup.contexts.nodes[]? |
+  if .__typename == "CheckRun" then
+    [ (if .status != "COMPLETED" then "pending"
+       elif .conclusion == "SUCCESS" or .conclusion == "NEUTRAL" or .conclusion == "SKIPPED" then "pass"
+       elif .conclusion == "CANCELLED" then "cancelled" else "failed" end),
+      (.isRequired|tostring), .name, (.detailsUrl // ""), (.startedAt // "" | if . == "" then "" else (fromdate|tostring) end) ]
+  else
+    [ (if .state == "SUCCESS" then "pass" elif .state == "PENDING" or .state == "EXPECTED" then "pending" else "failed" end),
+      (.isRequired|tostring), .context, (.targetUrl // ""), (.createdAt // "" | if . == "" then "" else (fromdate|tostring) end) ]
+  end | join("\u001f")'
+
+REQUIRED_LOADED=0
+# The rollup only flags checks that have reported. To see a required check that
+# never reported, read the required set from branch protection and rulesets. Both rule
+# fields: refUpdateRule is what applies to this token, so it is empty for an admin when
+# protection does not bind admins, and only admins can read branchProtectionRule.
+load_required() {
+  local base out rc
+  [ "$REQUIRED_LOADED" = 1 ] && return 0
+  : >"$TMP/required"
+  base=$(url_path "$BASE_REF")
+  out=$(gh_call api "repos/$REPO/rules/branches/$base" --paginate \
+    --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context'); rc=$?
+  if [ "$rc" -eq 0 ]; then
+    [ -n "$out" ] && printf '%s\n' "$out" >>"$TMP/required"
+  # Only "this repo has no rulesets to read" means none. A rate-limit 403 means nothing.
+  elif ! grep -Eq 'HTTP 404|Upgrade to GitHub|not available' "$GH_ERR"; then
+    return 1
+  fi
+  out=$(gh_call api graphql -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){baseRef{refUpdateRule{requiredStatusCheckContexts} branchProtectionRule{requiredStatusCheckContexts}}}}}' \
+    -f owner="$OWNER" -f name="$NAME" -F number="$PR" \
+    --jq '.data.repository.pullRequest.baseRef | (.refUpdateRule.requiredStatusCheckContexts // []) + (.branchProtectionRule.requiredStatusCheckContexts // []) | .[]') || return 1
+  [ -n "$out" ] && printf '%s\n' "$out" >>"$TMP/required"
+  REQUIRED_LOADED=1
+  return 0
+}
+
+fetch_checks() {
+  gh_call api graphql --paginate -f query="$CHECKS_QUERY" -f owner="$OWNER" -f name="$NAME" -F number="$PR" --jq "$CHECKS_JQ" >"$TMP/checks"
+}
+
+# Reads $TMP/checks and $TMP/required. Prints "mode<US>required|all", then one
+# "class<US>name<US>url" line per check, worst result per name.
+eval_checks() {
+  REQ_FILE=$TMP/required ADVISORY=$(conf_get advisory) awk -F"$US" '
+    function rank(c) { return c == "failed" ? 4 : c == "cancelled" ? 3 : c == "pending" ? 2 : 1 }
+    # Never merge on red, required or not, unless ship.conf calls it advisory.
+    function show(n) {
+      if (cls[n] != "failed" && cls[n] != "cancelled") return (nreq ? "other_" : "") cls[n] FS n
+      return (n in A) ? "advisory" FS n " " cls[n] : cls[n] FS n
+    }
+    BEGIN {
+      f = ENVIRON["REQ_FILE"]
+      while ((getline l < f) > 0) if (l != "") R[l] = 1
+      k = split(ENVIRON["ADVISORY"], a, "|"); for (i = 1; i <= k; i++) A[a[i]] = 1
+    }
+    NF >= 3 {
+      n = $3; seen[n] = 1
+      if ($2 == "true") R[n] = 1
+      # A rerun leaves its older runs in the list: the newest decides. One still queued or
+      # failed has no start time and counts as newest; any other with none counts as oldest.
+      t = ($5 != "") ? $5 + 0 : ($1 == "pending" || $1 == "failed" ? 9999999999 : 0)
+      if (!(n in cls) || t > tm[n] || (t == tm[n] && rank($1) > rank(cls[n]))) { cls[n] = $1; url[n] = $4; tm[n] = t }
+    }
+    END {
+      nreq = 0; for (n in R) nreq++
+      print "mode" FS (nreq ? "required" : "all")
+      for (n in R) print (n in seen ? cls[n] : "missing") FS n FS url[n]
+      for (n in seen) if (!(n in R)) print show(n) FS url[n]
+    }' "$TMP/checks" | sort
+}
+
+# True if a workflow should run on this PR. Asked only when a head has no checks. Its filters
+# come from the base branch, as a PR that leaves workflows alone runs them. Anything it cannot
+# read or follow, or a PR that changes workflows, counts as yes: wait, do not merge on a guess.
+PR_CI=""
+pr_ci_expected() {
+  [ -z "$PR_CI" ] || return "$PR_CI"
+  local paths p e files rc branch ref disabled
+  ref=$(url_path "$BASE_REF")
+  files=$(gh_call api "repos/$REPO/pulls/$PR/files" --paginate --jq '.[].filename') || return 0
+  case "$files" in .github/workflows/*|*"
+.github/workflows/"*) PR_CI=0; return 0 ;; esac
+  if ! paths=$(gh_call api "repos/$REPO/contents/.github/workflows?ref=$ref" --jq '.[] | select(.type == "file") | .path'); then
+    not_there || return 0
+    paths=""
+  fi
+  disabled=$(gh_call workflow list --repo "$REPO" --all --limit 200 --json path,state --jq '.[] | select(.state | startswith("disabled")) | .path') || return 0
+  while IFS= read -r p; do
+    case "$p" in *.yml|*.yaml) ;; *) continue ;; esac
+    if printf '%s\n' "$disabled" | grep -Fxq "$p"; then continue; fi
+    gh_call api "repos/$REPO/contents/$(url_path "$p")?ref=$ref" -H 'Accept: application/vnd.github.raw' >"$TMP/wf" || return 0
+    for e in pull_request pull_request_target push; do
+      branch=$BASE_REF
+      if [ "$e" = push ]; then
+        # Push CI on the PR's branch reports on this head too, unless the branch is on a fork.
+        [ "$IS_CROSS" != true ] || continue
+        branch=$HEAD_REF
+      fi
+      workflow_runs "$TMP/wf" "$e" "$branch" "$files"; rc=$?
+      if [ "$rc" = 0 ] || [ "$rc" = 2 ]; then PR_CI=0; return 0; fi
+    done
+  done <<EOT
+$paths
+EOT
+  PR_CI=1
+  return 1
+}
+# With nothing required there is no list to compare the reported checks with, and more can
+# still come: a needs: gap, a job skipped while the PR was a draft. So wait out a short time
+# from ship's start. A commit's date, or an old pass, says nothing about that.
+head_settled() { # n_pass now
+  local active waited=$(($2 - START))
+  if [ "$1" = 0 ] && [ "$NO_CHECKS_OK" = 0 ] && pr_ci_expected; then
+    if [ "$waited" -ge "$MISSING_GRACE" ]; then
+      finish "$EX_CHECK_MISSING" "no checks on ${PIN:0:9} after ${waited}s, and a workflow should have run on this PR, or its filters could not be read. If none are expected: ship $PR --allow-no-checks. $PR_URL"
+    fi
+    state "no checks yet on ${PIN:0:9}; a workflow should run on this PR, so waiting for them"
+    return 1
+  fi
+  if [ "$waited" -lt "$CHECK_GRACE" ]; then
+    state "no required checks; giving checks ${CHECK_GRACE}s to register ($1 passed so far)"
+    return 1
+  fi
+  # A job with needs: reports nothing until its dependency ends, but its run is still going.
+  active=$(gh_call run list --repo "$REPO" --commit "$PIN" --limit 100 --json status --jq '[.[] | select(.status != "completed")] | length') || active=unknown
+  [ "$active" != 0 ] || return 0
+  state "no required checks; runs on ${PIN:0:9} not finished: $active"
+  return 1
+}
+
+join_names() { # up to 5 names from stdin
+  awk 'NR <= 5 { s = s (NR > 1 ? ", " : "") $0 } END { if (NR > 5) s = s ", +" (NR - 5) " more"; print s }'
+}
+
+# Returns 0 when clear to merge, 1 if the PR merged while waiting.
+wait_checks() {
+  local check_timeout start deadline missing_since=0 blocked_since=0 t evald mode was_clear is_clear=0
+  local n_pass n_pending n_failed n_cancelled n_missing n_other_pending n_adv desc
+  check_timeout=${SHIP_CHECK_TIMEOUT:-3600}
+  start=$(now)
+  deadline=$((start + check_timeout))
+  while :; do
+    was_clear=$is_clear is_clear=0
+    if ! fetch_pr; then poll_fail "pr state" "$EX_ERR"; nap; continue; fi
+    guard_pr || return 1
+    if [ "$P_MSS" = "DIRTY" ] || [ "$P_MERGEABLE" = "CONFLICTING" ]; then
+      finish "$EX_CONFLICT" "PR #$PR conflicts with $BASE_REF (mergeable=$P_MERGEABLE state=$P_MSS). Resolve it and rerun ship. $PR_URL"
+    fi
+    if [ "$P_MSS" = "BEHIND" ]; then
+      finish "$EX_BEHIND" "PR #$PR is behind $BASE_REF and the repo requires up-to-date branches. Update would move the head, so ship stops here. Update it, wait for CI, rerun ship. $PR_URL"
+    fi
+    if ! load_required || ! fetch_checks; then poll_fail "checks" "$EX_ERR"; nap; continue; fi
+    POLL_FAILS=0
+    evald=$(eval_checks)
+    mode=$(printf '%s\n' "$evald" | awk -F"$US" '$1 == "mode" { print $2 }')
+    count_class() { printf '%s\n' "$evald" | awk -F"$US" -v c="$1" '$1 == c { n++ } END { print n + 0 }'; }
+    names_of() { printf '%s\n' "$evald" | awk -F"$US" -v c="$1" '$1 == c { print $2 }' | join_names; }
+    print_each() { # class label
+      printf '%s\n' "$evald" | while IFS=$US read -r c n u; do
+        if [ "$c" = "$1" ]; then log "$2: $n  ${u:-no log URL}"; fi
+      done
+    }
+    n_pass=$(count_class pass) n_pending=$(count_class pending) n_failed=$(count_class failed)
+    n_cancelled=$(count_class cancelled) n_missing=$(count_class missing)
+    n_other_pending=$(count_class other_pending) n_adv=$(count_class advisory)
+    ADVISORY_NOTE=""
+    [ "$n_adv" -eq 0 ] || ADVISORY_NOTE="Advisory, did not stop the run: $(names_of advisory)."
+
+    if [ "$n_failed" -gt 0 ]; then
+      print_each failed "FAILED"
+      finish "$EX_CHECK_FAILED" "$n_failed check(s) failed on ${PIN:0:9}. Not rerunning them. Look at the log and fix the cause. $PR_URL"
+    fi
+    if [ "$n_cancelled" -gt 0 ]; then
+      print_each cancelled "CANCELLED"
+      finish "$EX_CHECK_CANCELLED" "$n_cancelled check(s) cancelled on ${PIN:0:9}. Not rerunning them. $PR_URL"
+    fi
+
+    t=$(now)
+    if [ "$n_pending" -eq 0 ] && [ "$n_missing" -eq 0 ]; then
+      if [ "$mode" = "all" ] && ! head_settled "$((n_pass + n_adv))" "$t"; then
+        :
+      elif [ "$P_MERGEABLE" = "UNKNOWN" ] || [ "$P_MSS" = "UNKNOWN" ]; then
+        state "checks clear ($n_pass passed); GitHub is still computing mergeability"
+      elif [ "$P_MSS" = "BLOCKED" ]; then
+        [ "$blocked_since" -eq 0 ] && blocked_since=$t
+        if [ $((t - blocked_since)) -ge "$BLOCKED_SETTLE" ]; then
+          finish "$EX_MERGE_FAILED" "PR #$PR is BLOCKED with checks clear (review=${P_REVIEW:-none}). A review or branch rule is holding it. $PR_URL"
+        fi
+        state "checks clear ($n_pass passed); merge state is BLOCKED, giving it ${BLOCKED_SETTLE}s to settle"
+      else
+        if [ "$mode" = "all" ]; then
+          if [ "$((n_pass + n_adv))" -eq 0 ]; then desc="no checks on this head and none are required"
+          else desc="no required checks configured; gated on all $n_pass reported check(s)"; fi
+        else
+          desc="required checks"
+        fi
+        state "$desc; clear with $n_pass passed, merge state $P_MSS"
+        # Two clear reads in a row, the second right before the merge, so a freeze or a
+        # flip to red since the first one shows up.
+        [ "$was_clear" = 0 ] || { print_each advisory "ADVISORY"; return 0; }
+        is_clear=1
+        test_point between-reads
+        continue
+      fi
+    else
+      blocked_since=0
+      desc="checks ($mode): $n_pass passed"
+      [ "$n_pending" -gt 0 ] && desc="$desc, $n_pending pending ($(names_of pending))"
+      [ "$n_missing" -gt 0 ] && desc="$desc, $n_missing missing ($(names_of missing))"
+      state "$desc"
+      if [ "$n_pending" -gt 0 ] || [ "$n_other_pending" -gt 0 ]; then
+        # A job with `needs:` does not report until its dependency finishes.
+        missing_since=0
+      elif [ "$n_missing" -gt 0 ]; then
+        [ "$missing_since" -eq 0 ] && missing_since=$t
+        if [ $((t - missing_since)) -ge "$MISSING_GRACE" ]; then
+          finish "$EX_CHECK_MISSING" "required check(s) never reported on ${PIN:0:9}: $(names_of missing). Nothing is running that could report them. A path filter may have skipped the workflow. $PR_URL"
+        fi
+      fi
+    fi
+    if [ "$t" -ge "$deadline" ]; then
+      [ "$n_missing" -gt 0 ] && finish "$EX_CHECK_MISSING" "required check(s) never reported on ${PIN:0:9} in ${check_timeout}s: $(names_of missing). Nothing merged. $PR_URL"
+      finish "$EX_TIMEOUT" "checks not clear after ${check_timeout}s. Last: $LAST_STATE. Nothing merged."
+    fi
+    nap
+  done
+}
+
+### Merge and branch cleanup ###############################################
+PULL_MERGED="" PULL_SHA="" PULL_STATE=""
+fetch_pull() {
+  local line
+  line=$(gh_call api "repos/$REPO/pulls/$PR" --jq '[(.merged|tostring),(.merge_commit_sha//""),.state] | join("\u001f")') || return 1
+  IFS=$US read -r PULL_MERGED PULL_SHA PULL_STATE <<<"$line"
+  [ -n "$PULL_MERGED" ]
+}
+# Sets MERGE_SHA once the API says the PR merged. Returns 1 if it should go back to waiting.
+do_merge() {
+  local rc err deadline
+  MERGE_ATTEMPTED=1
+  : >"$ACTIVE/$RUN_ID"
+  stage merging
+  log "merging PR #$PR with --squash --match-head-commit ${PIN:0:9}"
+  GH_CALL_TIMEOUT=60 gh_call pr merge "$PR" --repo "$REPO" --squash --match-head-commit "$PIN" >"$TMP/merge.out"; rc=$?
+  err=$(gh_err)
+  test_point after-merge-call
+  [ "$rc" = 0 ] || log "the merge call failed: $err; asking GitHub what happened"
+  # The API decides what happened, whatever exit code gh returned.
+  deadline=$(( $(now) + MERGE_CONFIRM_TIMEOUT ))
+  while :; do
+    if fetch_pull && [ "$PULL_MERGED" = "true" ]; then
+      MERGE_SHA=$PULL_SHA
+      [ -n "$MERGE_SHA" ] || finish "$EX_ERR" "API says PR #$PR merged but gives no merge commit. Nothing deleted."
+      rec merged "$MERGE_SHA"
+      log "merge confirmed by API: ${MERGE_SHA:0:9}"
+      test_point after-confirm
+      return 0
+    fi
+    # GitHub answered no. Often another merge just moved the base, so go back and let the
+    # gates judge what is true now. A 502 or a timeout says nothing, so that keeps asking.
+    case "$rc:$err" in
+      0:*|*"Something went wrong"*) ;;
+      *"(mergePullRequest)"*|*"branch was modified"*|*"not mergeable"*|*"merge conflicts"*|*"base branch policy"*|*"not authorized"*|*"Must have"*|*"Required status check"*|*"merge method"*|*"clean status"*)
+        MERGE_ATTEMPTED=0; rm -f "$ACTIVE/$RUN_ID"
+        rec refused "$err"
+        MERGE_RETRIES=$((MERGE_RETRIES + 1))
+        if [ "$MERGE_RETRIES" -lt 5 ]; then log "going back to waiting"; return 1; fi
+        finish "$EX_MERGE_FAILED" "gh pr merge kept failing: $err. Nothing deleted. $PR_URL" ;;
+    esac
+    if [ "$(now)" -ge "$deadline" ]; then
+      finish "$EX_MERGE_UNKNOWN" "MERGE STATE UNKNOWN: no confirmation after ${MERGE_CONFIRM_TIMEOUT}s (state=$PULL_STATE${err:+, gh said: $err}). A merge queue may hold it, or it may still land. Nothing deleted. Ask again: ship --status $RUN_ID"
+    fi
+    sleep 2 3>&-
+  done
+}
+branch_kept() { log "kept remote branch $HEAD_REF: $1"; BRANCH_NOTE="Branch $HEAD_REF left behind: $1."; }
+delete_remote_branch() {
+  local enc sha others i
+  [ "$IS_CROSS" = "true" ] && { log "branch $HEAD_REF is on a fork; leaving it"; return 0; }
+  if [ "$HEAD_REF" = "$DEFAULT_BRANCH" ]; then log "head is the default branch; not deleting"; return 0; fi
+  enc=$(url_path "$HEAD_REF")
+  if ! sha=$(gh_call api "repos/$REPO/git/ref/heads/$enc" --jq .object.sha); then
+    if grep -q 'HTTP 404' "$GH_ERR"; then log "remote branch $HEAD_REF already gone"
+    else branch_kept "could not read it: $(gh_err)"; fi
+    return 0
+  fi
+  [ "$sha" = "$PIN" ] || { branch_kept "it is at ${sha:0:9}, past the merged ${PIN:0:9}, so it holds unmerged commits"; return 0; }
+  others=$(gh_call pr list --repo "$REPO" --base "$HEAD_REF" --state open --json number --jq '[.[].number|tostring]|join(", #")') \
+    || { branch_kept "could not list PRs based on it: $(gh_err)"; return 0; }
+  [ -z "$others" ] || { branch_kept "open PR #$others uses it as a base. Retarget, then delete: gh pr edit <n> --repo $REPO --base $DEFAULT_BRANCH"; return 0; }
+  others=$(gh_call pr list --repo "$REPO" --head "$HEAD_REF" --state open --json number,isCrossRepository --jq '[.[]|select(.isCrossRepository|not)|.number|tostring]|join(", #")') \
+    || { branch_kept "could not list PRs from it: $(gh_err)"; return 0; }
+  [ -z "$others" ] || { branch_kept "open PR #$others uses it as a head"; return 0; }
+  # updateRefs checks beforeOid atomically, so a push landing after the read above makes
+  # this fail and leaves the branch. GitHub sometimes fails it just after a merge: retry.
+  for i in 1 2 3; do
+    if gh_call api graphql -f query="$REF_MUTATION" -f id="$P_REPO_ID" -f name="refs/heads/$HEAD_REF" -f before="$PIN" -f after="$ZERO_OID" >/dev/null; then
+      log "deleted remote branch $HEAD_REF"
+      return 0
+    fi
+    # GitHub's own delete-on-merge can take the branch during this call.
+    local err; err=$(gh_err)
+    if ! gh_call api "repos/$REPO/git/ref/heads/$enc" --jq .object.sha >/dev/null && grep -q 'HTTP 404' "$GH_ERR"; then
+      log "remote branch $HEAD_REF already gone"
+      return 0
+    fi
+    [ "$i" = 3 ] || sleep "$i" 3>&-
+  done
+  branch_kept "delete failed 3 times: $err"
+}
+
+### Deploy watch ###########################################################
+RESULT_CODE=0 RESULT_MSG=""
+set_result() { RESULT_CODE=$1; RESULT_MSG=$2; }
+
+watch_deploy() {
+  local t t0 start_timeout deploy_timeout start_deadline hard_deadline stable=0 out known=1 api_ok
+  local id name st concl url n_dep n_active n_other_active fails oks skipped ids_pat desc newer n_st n_c n_u more late
+  if [ "$NO_WATCH" = 1 ]; then
+    set_result "$EX_NOT_WATCHED" "$MW ${MERGE_SHA:0:9}; deploy watch off, so deploy is NOT verified"; return; fi
+  if [ "$BASE_REF" != "$DEFAULT_BRANCH" ]; then
+    set_result "$EX_NOT_WATCHED" "$MW ${MERGE_SHA:0:9} into $BASE_REF, not $DEFAULT_BRANCH; no deploy expected"; return; fi
+  if [ "$(lc "$(conf_get deploy)")" = none ]; then
+    set_result "$EX_NOT_WATCHED" "$MW ${MERGE_SHA:0:9}; ship.conf says this repo has no deploy workflow"; return; fi
+  stage watching_deploy
+  discover_with_retries || { set_result "$EX_DEPLOY_TIMEOUT" "$MW ${MERGE_SHA:0:9}; could not read its deploy sources: $(gh_err). Deploy result unknown."; return; }
+  log_deploy_sources
+  start_timeout=${SHIP_DEPLOY_START_TIMEOUT:-300}
+  deploy_timeout=${SHIP_DEPLOY_TIMEOUT:-3600}
+  if [ -z "$DEPLOY_IDS" ] && [ -z "$EXT_SEEN" ] && [ -z "$DEPLOY_OVERRIDE" ]; then
+    # Nothing says this repo deploys, so a short look and no alarm if nothing shows up.
+    known=0
+    start_timeout=$DEPLOY_PROBE
+  fi
+  if [ "$known" = 1 ] && no_deploy_expected; then
+    # Still a short look, in case one starts anyway.
+    known=2
+    start_timeout=$DEPLOY_PROBE
+  fi
+  log "watching deploy for ${MERGE_SHA:0:9}"
+  t0=$(now)
+  start_deadline=$((t0 + start_timeout))
+  hard_deadline=$((t0 + deploy_timeout))
+  ids_pat=",$DEPLOY_IDS,"
+  while :; do
+    api_ok=1
+    if ! out=$(gh_call run list --repo "$REPO" --commit "$MERGE_SHA" --limit 50 \
+        --json workflowDatabaseId,workflowName,status,conclusion,url \
+        --jq '.[] | [(.workflowDatabaseId|tostring),.workflowName,.status,(.conclusion//"none"),.url] | join("\u001f")'); then
+      api_ok=0
+    elif ! ext_signals "$MERGE_SHA"; then
+      api_ok=0
+    fi
+    # Scheduled runs on a long-lived commit can push its deploy out of that list, so ask directly.
+    if [ "$api_ok" = 1 ] && ! printf '%s\n' "$out" | grep -Eq "^(${DEPLOY_IDS//,/|})$US"; then
+      for id in $(printf '%s' "$DEPLOY_IDS" | tr ',' ' '); do
+        more=$(gh_call run list --repo "$REPO" --workflow "$id" --commit "$MERGE_SHA" --limit 5 --json workflowDatabaseId,workflowName,status,conclusion,url \
+          --jq '.[] | [(.workflowDatabaseId|tostring),.workflowName,.status,(.conclusion//"none"),.url] | join("\u001f")') || { api_ok=0; break; }
+        [ -z "$more" ] || out="$out
+$more"
+      done
+    fi
+    if [ "$api_ok" = 0 ]; then
+      POLL_FAILS=$((POLL_FAILS + 1))
+      log "API error on deploy watch ($POLL_FAILS/5): $(gh_err)"
+      if [ "$POLL_FAILS" -ge 5 ]; then
+        set_result "$EX_DEPLOY_TIMEOUT" "$MW ${MERGE_SHA:0:9}; lost the API while watching deploy, so its result is unknown"; return
+      fi
+      nap; continue
+    fi
+    POLL_FAILS=0
+    n_dep=0 n_active=0 n_other_active=0 fails="" oks="" skipped=0 desc=""
+    while IFS=$US read -r id name st concl url; do
+      [ -n "$id" ] || continue
+      case "$ids_pat" in
+        *",$id,"*)
+          n_dep=$((n_dep + 1))
+          if [ "$st" != "completed" ]; then
+            n_active=$((n_active + 1))
+            desc="${desc:+$desc; }$name $st $url"
+          else
+            case "$concl" in
+              success) oks="${oks:+$oks; }$name $url" ;;
+              skipped) skipped=$((skipped + 1)) ;;
+              cancelled)
+                # In a queueing workflow a newer deploy replaces a pending one and carries
+                # this commit too, so its result is this commit's result.
+                if ! newer=$(gh_call run list --repo "$REPO" --workflow "$id" --branch "$DEFAULT_BRANCH" --limit 1 --json headSha,status,conclusion,url \
+                  --jq '.[0]|select(.headSha != "'"$MERGE_SHA"'")|[.status,(.conclusion//"none"),.url]|join("\u001f")'); then
+                  # No answer is no verdict. Ask again next poll.
+                  n_active=$((n_active + 1)); desc="${desc:+$desc; }$name cancelled, looking for a newer run"
+                  continue
+                fi
+                n_st="" n_c="" n_u=""
+                IFS=$US read -r n_st n_c n_u <<<"$newer"
+                if [ "$n_st" = completed ] && [ "$n_c" = success ]; then oks="${oks:+$oks; }$name superseded by $n_u"
+                elif [ -n "$n_st" ] && [ "$n_st" != completed ]; then n_active=$((n_active + 1)); desc="${desc:+$desc; }$name superseded by $n_u"
+                else fails="${fails:+$fails; }$name cancelled ${n_u:-$url}"; fi ;;
+              *) fails="${fails:+$fails; }$name $concl $url" ;;
+            esac
+          fi ;;
+        *) [ "$st" != "completed" ] && n_other_active=$((n_other_active + 1)) ;;
+      esac
+    done <<<"$out"
+    while IFS=$US read -r st name url; do
+      [ -n "$st" ] || continue
+      n_dep=$((n_dep + 1))
+      case "$st" in
+        active) n_active=$((n_active + 1)); desc="${desc:+$desc; }$name $url" ;;
+        success) oks="${oks:+$oks; }$name $url" ;;
+        skipped) skipped=$((skipped + 1)) ;;
+        *) fails="${fails:+$fails; }$name $st $url" ;;
+      esac
+    done <"$TMP/ext"
+    t=$(now)
+    if [ "$n_dep" -eq 0 ]; then
+      state "no deploy seen yet for ${MERGE_SHA:0:9} ($n_other_active other run(s) active)"
+      # A deploy chained off CI cannot start until CI ends, so keep the window open.
+      if { [ "$t" -ge "$start_deadline" ] && [ "$n_other_active" -eq 0 ]; } || [ "$t" -ge "$hard_deadline" ]; then
+        if [ "$known" = 2 ]; then
+          set_result "$EX_NOT_WATCHED" "$MW ${MERGE_SHA:0:9}; no deploy expected: the filters of [$DEPLOY_NAMES] do not match this merge."
+        elif [ "$known" = 0 ]; then
+          set_result "$EX_NOT_WATCHED" "$MW ${MERGE_SHA:0:9}; no deploy source found, so deploy is NOT verified. Set deploy= in ship.conf if it has another name."
+        else
+          set_result "$EX_NO_DEPLOY" "$MW ${MERGE_SHA:0:9} but NO DEPLOY STARTED within $((t - t0))s. Expected from: workflows [$DEPLOY_NAMES], external [$EXT_SEEN]${DEPLOY_OVERRIDE:+, ship.conf [$DEPLOY_OVERRIDE]}. A path filter or skip rule may have skipped it. Check production."
+        fi
+        return
+      fi
+    elif [ "$n_active" -gt 0 ]; then
+      stable=0
+      state "deploy: $desc"
+      if [ "$t" -ge "$hard_deadline" ]; then
+        set_result "$EX_DEPLOY_TIMEOUT" "$MW ${MERGE_SHA:0:9}; deploy still running after ${deploy_timeout}s: $desc"; return
+      fi
+    else
+      # Two polls in a row, in case a second deploy source registers late.
+      stable=$((stable + 1))
+      if [ "$stable" -ge 2 ]; then
+        if [ -n "$fails" ]; then
+          set_result "$EX_DEPLOY_FAILED" "$MW ${MERGE_SHA:0:9} but DEPLOY FAILED: $fails"
+        elif [ -n "$oks" ]; then
+          # Not "deployed" while a workflow this merge should start has not run.
+          printf '%s\n' "$out" | cut -d"$US" -f1 >"$TMP/ran"
+          late=$(deploys_outstanding "$TMP/ran")
+          if [ -z "$late" ]; then
+            set_result "$EX_OK" "$MW ${MERGE_SHA:0:9} and deployed: $oks"
+          elif [ "$t" -lt "$start_deadline" ] || [ "$n_other_active" -gt 0 ] && [ "$t" -lt "$hard_deadline" ]; then
+            stable=0; state "deployed: $oks; still expecting: $late"; nap; continue
+          else
+            set_result "$EX_NO_DEPLOY" "$MW ${MERGE_SHA:0:9}; deployed: $oks; but NO DEPLOY STARTED for: $late. Check production."
+          fi
+        else
+          set_result "$EX_NO_DEPLOY" "$MW ${MERGE_SHA:0:9} but the deploy run was SKIPPED ($skipped run(s)). Nothing deployed. Check production."
+        fi
+        return
+      fi
+    fi
+    nap
+  done
+}
+
+# Its own session, so the caller's exit or a kill of its process group does not reach it.
+start_watch() {
+  [ "$WATCHING" = 0 ] && [ "$NO_WATCH" = 0 ] && [ "$BASE_REF" = "$DEFAULT_BRANCH" ] && [ "$(lc "$(conf_get deploy)")" != none ] || return 0
+  WATCHING=1
+  : >"$ACTIVE/$RUN_ID"
+  rec watch "$MERGE_SHA"
+  ( if command -v perl >/dev/null 2>&1; then
+      exec perl -e 'use POSIX (); POSIX::setsid(); exec { $ARGV[0] } @ARGV; exit 127' -- "$BASH" "$0" --watch-sha "$MERGE_SHA" --repo "$REPO" --run "$RUN_ID"
+    fi
+    exec nohup "$BASH" "$0" --watch-sha "$MERGE_SHA" --repo "$REPO" --run "$RUN_ID"
+  ) </dev/null >/dev/null 2>&1 3>&- &
+  rec proc "$! $(ps -o lstart= -p "$!" 2>/dev/null)"
+}
+
+### Main ###################################################################
+rec proc "$$ $(ps -o lstart= -p "$$" 2>/dev/null)"
+command -v gh >/dev/null 2>&1 || finish "$EX_ERR" "gh is not installed"
+if [ -z "$REPO" ]; then
+  REPO=$(gh_call repo view --json nameWithOwner --jq .nameWithOwner) \
+    || finish "$EX_ERR" "cannot resolve repo here, pass --repo: $(gh_err)"
+fi
+[[ "$REPO" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || finish "$EX_USAGE" "bad repo: $REPO"
+OWNER=${REPO%%/*}; NAME=${REPO#*/}
+[ -n "$RUN_ARG" ] || rec repo "$REPO"
+
+if [ -n "$WATCH_SHA" ]; then
+  MW=commit
+  i=0
+  until DEFAULT_BRANCH=$(gh_call repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name) \
+    && MERGE_SHA=$(gh_call api "repos/$REPO/commits/$WATCH_SHA" --jq .sha); do
+    i=$((i + 1))
+    [ "$i" -lt 5 ] || finish "$EX_DEPLOY_TIMEOUT" "cannot read $WATCH_SHA in $REPO: $(gh_err). Deploy result unknown."
+    sleep 3 3>&-
+  done
+  BASE_REF=$DEFAULT_BRANCH
+  watch_deploy
+  finish "$RESULT_CODE" "$RESULT_MSG"
+fi
+
+rec pr "$PR"
+fetch_pr || finish "$EX_ERR" "cannot read PR #$PR in $REPO: $(gh_err)"
+PIN=$P_HEAD
+log "$REPO PR #$PR: $HEAD_REF -> $BASE_REF, state $P_STATE, pinned head ${PIN:0:9}, run $RUN_ID"
+[ "$P_STATE" = "MERGED" ] && finish "$EX_REFUSED" "PR #$PR is already merged"
+guard_pr
+
+# If this process dies while waiting, nothing has happened.
+already_merged=0 MERGE_RETRIES=0
+while :; do
+  stage waiting
+  wait_checks || { already_merged=1; break; }
+  test_point before-merge
+  # A caller killed on its own leaves this process running with nobody to tell. So does an
+  # agent that crashed under a surviving shell wrapper: that wrapper gets a new parent.
+  if [ "$CALLER" != 1 ] && [ "$(ps -o ppid= -p "$CALLER" 2>/dev/null | tr -d ' ')" != "$CALLER_PARENT" ]; then
+    finish "$EX_ORPHANED" "the caller is gone, so nothing merged. Rerun: ship $PR --repo $REPO"
+  fi
+  do_merge && break
+  nap
+done
+
+if [ "$already_merged" = 1 ]; then
+  log "PR #$PR merged at the pinned head while ship waited (auto-merge or someone else)"
+  MERGE_SHA=$P_MERGE_OID
+  if [ -z "$MERGE_SHA" ] && fetch_pull; then MERGE_SHA=$PULL_SHA; fi
+  [ -n "$MERGE_SHA" ] || finish "$EX_ERR" "PR merged but the API gives no merge commit"
+  rec merged "$MERGE_SHA"
+fi
+# First thing after a confirmed merge, so a signal from here on cannot lose the watch.
+[ "$WAIT_DEPLOY" = 1 ] || start_watch
+delete_remote_branch
+[ "$WATCHING" = 1 ] || { watch_deploy; finish "$RESULT_CODE" "$RESULT_MSG${BRANCH_NOTE:+ $BRANCH_NOTE}"; }
+finish "$EX_OK" "merged $MERGE_SHA; deploy watch running. Result: ship --status $RUN_ID${BRANCH_NOTE:+ $BRANCH_NOTE}"

@@ -1,6 +1,6 @@
 interface:
   display_name: "Implement"
-  short_description: "Run the full implementation lifecycle"
-  default_prompt: "Use $implement-lifecycle:implement to implement this task through review, verification, and merge."
+  short_description: "Take a code change from request to merged"
+  default_prompt: "Use $implement-lifecycle:implement to take this change from request to merged."
 policy:
   allow_implicit_invocation: false

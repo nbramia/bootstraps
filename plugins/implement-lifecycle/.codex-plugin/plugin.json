@@ -1,20 +1,30 @@
 {
   "name": "implement-lifecycle",
-  "version": "3.10.19",
-  "description": "Cross-client implementation lifecycle with adversarial PR review — plan, implement, PR, review/address loop, verify, merge",
+  "version": "4.0.0",
+  "description": "Take a code change from request to merged with subagents, adversarial review from another model family, real verification and the ship command",
   "author": {
     "name": "benjamcalvin"
   },
   "license": "MIT",
-  "keywords": ["implement", "review", "pr", "lifecycle", "adversarial", "tdd", "merge"],
+  "keywords": [
+    "implement",
+    "review",
+    "pr",
+    "adversarial",
+    "merge"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Implement Lifecycle",
     "shortDescription": "Implement, review, verify, and merge changes.",
-    "longDescription": "Run a complete implementation lifecycle with delegated coding, a holistic general review plus targeted specialist review when warranted, bounded addressing, documentation checks, end-to-end verification, and merge handling.",
+    "longDescription": "Run a code change from request to merged: a subagent builds it and opens a PR, another model family tries to break it, the orchestrator judges the findings and records the review on the PR, the change is run for real, and the ship command lands it.",
     "developerName": "benjamcalvin",
     "category": "Developer Tools",
-    "capabilities": ["Read", "Write", "Interactive"],
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
     "defaultPrompt": [
       "Use $implement-lifecycle:implement to complete this task."
     ]
