@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Stub gh for the ship tests. State lives in $STUB. Logs every call to $STUB/calls.log.
+# seq NAME: emit NAME.N, moving N forward on each call and repeating the last file.
+printf '%s\n' "$*" >>"$STUB/calls.log"
+jq_expr=""; args=()
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--jq" ]; then jq_expr=$2; shift 2; else args+=("$1"); shift; fi
+done
+set -- "${args[@]}"
+emit() { if [ -n "$jq_expr" ]; then jq -r "$jq_expr"; else cat; fi; }
+seq_file() {
+  local n=1 c="$STUB/$1.counter"
+  [ -f "$c" ] && n=$(cat "$c")
+  if [ -f "$STUB/$1.$((n + 1))" ]; then echo $((n + 1)) >"$c"; fi
+  printf '%s' "$STUB/$1.$n"
+}
+fail_if_flag() { if [ -f "$STUB/fail.$1" ]; then c=$(cat "$STUB/fail.$1"); if [ "$c" -gt 0 ]; then echo $((c-1)) >"$STUB/fail.$1"; echo "boom: $1 transient" >&2; exit 1; fi; fi; }
+case "$1 $2" in
+  "repo view") fail_if_flag repoview; if [ -f "$STUB/repo_view.fail" ]; then echo "no repo" >&2; exit 1; fi
+    emit <"$STUB/repo_view.json" ;;
+  "workflow list") fail_if_flag wflist; emit <"$STUB/workflows.json" ;;
+  "run list")
+    case "$*" in
+      *--commit\ aaaaaaaaaa*|*--commit\ bbbbbbbbbb*) fail_if_flag runhead; if [ -f "$STUB/runs_head.1" ]; then f=$(seq_file runs_head); emit <"$f"; else echo '[]' | emit; fi ;;
+      *--commit*--limit\ 5\ --json*) if [ -f "$STUB/runs_direct.json" ]; then emit <"$STUB/runs_direct.json"; else echo '[]' | emit; fi ;;
+      *--commit*) f=$(seq_file runs_commit); emit <"$f" ;;
+      *--workflow*) fail_if_flag wfrun; emit <"$STUB/runs_wf.json" ;;
+    esac ;;
+  "pr merge")
+    [ -f "$STUB/merge.delay" ] && sleep "$(cat "$STUB/merge.delay")"
+    if [ -f "$STUB/merge.failonce" ]; then cat "$STUB/merge.failonce" >&2; rm "$STUB/merge.failonce"; exit 1; fi
+    if [ -f "$STUB/merge.fail" ]; then cat "$STUB/merge.fail" >&2
+      [ -f "$STUB/merge.lands_anyway" ] && touch "$STUB/merged"
+      exit 1; fi
+    [ -f "$STUB/merge.silent" ] || touch "$STUB/merged"
+    echo "merged" ;;
+  "pr list")
+    case "$*" in
+      *--base*) emit <"$STUB/prs_base.json" ;;
+      *--head*) emit <"$STUB/prs_head.json" ;;
+      *) if [ -f "$STUB/pr_list.fail" ]; then exit 1; fi; emit <"$STUB/prs_all.json" ;;
+    esac ;;
+  "api graphql")
+    case "$*" in
+      *statusCheckRollup*) fail_if_flag checks; if [ -f "$STUB/checks.delay" ]; then sleep "$(cat "$STUB/checks.delay")"; rm "$STUB/checks.delay"; fi; f=$(seq_file checks); emit <"$f" ;;
+      *refUpdateRule*) emit <"$STUB/ref_rule.json" ;;
+      *updateRefs*)
+        [ -f "$STUB/delete.fail" ] && { echo "gh: Something went wrong while executing your query" >&2; exit 1; }
+        if [ -f "$STUB/delete.flaky" ]; then c=$(cat "$STUB/delete.flaky"); if [ "$c" -gt 0 ]; then echo $((c-1)) >"$STUB/delete.flaky"; echo "gh: Something went wrong while executing your query" >&2; exit 1; fi; fi
+        echo '{}' ;;
+      *) fail_if_flag pr; f=$(seq_file pr); emit <"$f" ;;
+    esac ;;
+  *)
+    if [ "$1" != "api" ]; then echo "stub gh: unhandled: $*" >&2; exit 99; fi
+    case "$2" in
+      *"/deployments?sha="*) f=$(seq_file deploy_sha); emit <"$f" ;;
+      *"/deployments?per_page"*) emit <"$STUB/deploy_recent.json" ;;
+      */deployments/*/statuses*) id=${2#*/deployments/}; id=${id%%/*}; f=$(seq_file "dstatus_$id"); emit <"$f" ;;
+      */commits/*/status) f=$(seq_file cstatus); emit <"$f" ;;
+      */commits/*/check-runs*) f=$(seq_file cruns); emit <"$f" ;;
+      */contents/.github/workflows\?*)
+        [ ! -f "$STUB/contents.fail" ] || { echo "HTTP 502" >&2; exit 1; }
+        [ ! -f "$STUB/contents.404" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+        [ ! -f "$STUB/contents.badref" ] || { echo "gh: No commit found for the ref x (HTTP 404)" >&2; exit 1; }
+        jq 'map({type:"file",path:.path})' "$STUB/workflows.json" | emit ;;
+      */contents/*) [ ! -f "$STUB/contents.fail" ] || { echo "HTTP 502" >&2; exit 1; }
+        [ ! -f "$STUB/contents.badref" ] || { echo "gh: No commit found for the ref x (HTTP 404)" >&2; exit 1; }
+        # wf.NAME@REF is that file at that ref. Without a ?ref= the call reads the default branch.
+        p=${2%%\?*}; p=${p//%20/ }; f="$STUB/wf.${p##*/}"; [ ! -f "$f.gone" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+        case "$2" in *\?ref=*) [ ! -f "$f@${2##*\?ref=}" ] || f="$f@${2##*\?ref=}" ;; esac; [ -f "$f" ] || f=$STUB/wf.yml; cat "$f" 2>/dev/null; exit 0 ;;
+      */commits/*) fail_if_flag commit; { echo "{\"sha\":\"${2##*/}\",\"files\":["; sed 's/.*/{"filename":"&"},/' "$STUB/changed" 2>/dev/null; echo '{"filename":""}]}'; } | jq 'del(.files[]|select(.filename==""))' | emit ;;
+      */rules/branches/*)
+        [ ! -f "$STUB/rules.403" ] || { echo "gh: API rate limit exceeded (HTTP 403)" >&2; rm "$STUB/rules.403"; exit 1; }
+        if [ -f "$STUB/rules.json" ]; then emit <"$STUB/rules.json"; else echo "HTTP 404" >&2; exit 1; fi ;;
+      */git/ref/heads/*)
+        if [ -f "$STUB/ref.json" ]; then emit <"$STUB/ref.json"; else echo "HTTP 404: Not Found" >&2; exit 1; fi ;;
+      */pulls/*/files*) { echo '['; sed 's/.*/{"filename":"&"},/' "$STUB/prfiles" 2>/dev/null; echo '{"filename":""}]'; } | jq 'map(select(.filename!=""))' | emit ;;
+      */pulls/*)
+        [ ! -f "$STUB/pulls.fail" ] || { echo "HTTP 502" >&2; exit 1; }
+        if [ -f "$STUB/merged" ]; then emit <"$STUB/pull_merged.json"; else emit <"$STUB/pull_open.json"; fi ;;
+      *) echo "stub gh: unhandled api: $*" >&2; exit 99 ;;
+    esac ;;
+esac

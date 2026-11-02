@@ -28,6 +28,8 @@ bootstraps/
 │       ├── hooks/           # Hook configurations (if any)
 │       │   └── hooks.json
 │       └── references/      # On-demand documentation
+├── tools/                 # Command-line tools that are not plugins
+│   └── ship/              # Merge one PR and watch its deploy
 ├── validate-all.sh        # Plugin validation script
 └── README.md
 ```
@@ -47,7 +49,7 @@ Every change to a plugin **must** include a version bump in that plugin's `.clau
 - Add a plugin to the Codex marketplace only when its complete workflow works in Codex; Claude-specific agents, hooks, and SDKs are not portable merely because the skill format is shared
 - One plugin does one thing well
 - Plugins can bundle skills, hooks, agents, and assets
-- Self-containment forces some guidance to be duplicated across plugins. For PR scope, `bootstrap-docs`' `standards-pr-template.md` holds the authoritative wording; `pr-check`, `draft-issue`, `refine-issue`, and `implement`'s referee paraphrase it. Change it there first, then re-sync the paraphrases
+- Self-containment forces some guidance to be duplicated across plugins. For PR scope, `bootstrap-docs`' `standards-pr-template.md` holds the authoritative wording; `draft-issue` and `refine-issue` paraphrase it. Change it there first, then re-sync the paraphrases
 - Deprecating a plugin, or marking one work-in-progress, means declaring that status on every surface a user can reach it from: the plugin manifest description and keywords, the marketplace entry description and tags, the skill's frontmatter description and tags, a banner at the top of the skill body, and the README's plugin table, detail section, and install/usage examples. Keep the deprecated plugin installable and bump its version — that is how existing users receive the notice; removing the marketplace entry only strands them on a copy that never shows it. Nothing validates these copies against each other, so re-sync them by hand on every edit
 - See existing plugins for schema examples
 

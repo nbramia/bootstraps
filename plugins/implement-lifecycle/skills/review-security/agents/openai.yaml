@@ -1,6 +1,0 @@
-interface:
-  display_name: "Review Security"
-  short_description: "Security-focused pull request review"
-  default_prompt: "Use $implement-lifecycle:review-security to inspect this PR for security risks."
-policy:
-  allow_implicit_invocation: false

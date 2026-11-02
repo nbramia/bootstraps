@@ -1,10 +1,17 @@
 {
   "name": "implement-lifecycle",
-  "version": "3.10.19",
-  "description": "Harness-neutral implementation lifecycle with adversarial PR review",
+  "version": "4.0.0",
+  "description": "Take a code change from request to merged with subagents, adversarial review from another model family, real verification and the ship command",
   "private": true,
-  "keywords": ["pi-package", "agent-skills", "implementation", "review", "lifecycle"],
+  "keywords": [
+    "pi-package",
+    "agent-skills",
+    "implementation",
+    "review"
+  ],
   "pi": {
-    "skills": ["./skills"]
+    "skills": [
+      "./skills"
+    ]
   }
 }

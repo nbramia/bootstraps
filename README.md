@@ -2,24 +2,14 @@
 
 A cross-compatible Claude Code, OpenAI Codex, and Pi collection of reusable skills, hooks, and project scaffolds.
 
-## Prerequisites
-
-This is a private repository. You need access to `benjamcalvin/bootstraps` on GitHub and git credentials configured (e.g. `gh auth login`).
-
-For automatic plugin updates at Claude Code startup, set a GitHub token in your environment:
-
-```sh
-export GITHUB_TOKEN=ghp_your_token_here
-```
-
-Without this, plugins still work — you just need to update manually with `/plugin marketplace update bootstraps`.
+This repo began as a fork of [benjamcalvin/bootstraps](https://github.com/benjamcalvin/bootstraps).
 
 ## Install in Claude Code
 
 Add the marketplace to Claude Code:
 
 ```
-/plugin marketplace add benjamcalvin/bootstraps
+/plugin marketplace add nbramia/bootstraps
 ```
 
 ## Browse Plugins
@@ -43,7 +33,7 @@ Navigate to the **Discover** tab to browse plugins from this marketplace.
 Add the marketplace to Codex CLI:
 
 ```sh
-codex plugin marketplace add benjamcalvin/bootstraps
+codex plugin marketplace add nbramia/bootstraps
 ```
 
 Open the plugin browser with `/plugins`, install a plugin from the **Bootstraps** marketplace, and start a new session so Codex loads its skills.
@@ -58,7 +48,7 @@ Pi can install the plugin directory as a local package. From a checkout of this 
 pi install ./plugins/implement-lifecycle
 ```
 
-This package exposes its `skills/` directory through `package.json`; restart Pi, then use `/skill:implement #42`. For lifecycle delegation, separately install [`pi-subagents`](https://github.com/nicobailon/pi-subagents); it supplies the fresh generic `delegate` child used by the Pi adapter. It is a user-managed prerequisite, not a bundled dependency.
+This package exposes its `skills/` directory through `package.json`; restart Pi, then use `/skill:implement #42`. The skill delegates to subagents, so also install [`pi-subagents`](https://github.com/nicobailon/pi-subagents). It is a user-managed prerequisite, not a bundled dependency.
 
 ## Install a Plugin in Claude Code
 
@@ -100,7 +90,6 @@ Some skills accept arguments:
 /bootstrap-docs adr
 /implement #42
 /implement fix the login bug
-/implement 17 just review
 /bootstrap-worktrees
 /draft-issue add user avatar support
 /cleanup-issue #42
@@ -145,8 +134,8 @@ $issue-management:refine-issue #42
 |--------|-------------|-------|----|-------------|
 | **bootstrap-docs** | Yes | Yes | No | Set up a comprehensive, AI-readable documentation strategy in any project. Creates AGENTS.md, specs, ADRs, guides, plans, standards, and research templates. |
 | **bootstrap-worktrees** | Yes | No | No | Set up project-agnostic worktree isolation with per-worktree ports, Docker Compose projects, and config files. Discovers services and generates create/remove scripts plus Claude Code hooks. |
-| **implement-lifecycle** | Yes | Yes | Yes | Full implementation lifecycle with adversarial PR review — plan, implement, PR, review/address loop, docs gate, verify, merge. Pi delegation requires `pi-subagents`. |
-| **implement-cli** | Yes | No | No | **WIP — not recommended for general use.** CLI-based variant of the implementation lifecycle using the Python Agent SDK to orchestrate review/address subprocesses with native async parallelism. |
+| **implement-lifecycle** | Yes | Yes | Yes | Take a code change from request to merged with subagents, adversarial review from another model family, real verification and the `ship` command. Pi delegation requires `pi-subagents`. |
+| **implement-cli** | Yes | No | No | **WIP — not recommended for general use.** CLI-based implementation lifecycle using the Python Agent SDK to orchestrate review/address subprocesses with native async parallelism. |
 | **implement-team** | Yes | No | No | **Deprecated — use implement-lifecycle instead.** Implementation lifecycle re-architected around Claude Code agent-teams — long-lived implementer and reviewer teammates with shared task list and mailbox messaging. |
 | **issue-management** | Yes | Yes | No | Draft, clean up, and refine GitHub issues — optimized for AI agent consumption. |
 | **stop-guard** | Yes | No | No | Stop hook that evaluates task completion via Gemini CLI and blocks premature stops. Opt-in per session via activation marker. |
@@ -154,69 +143,29 @@ $issue-management:refine-issue #42
 
 ### implement-lifecycle
 
-Provides a shared lifecycle orchestrator, two utility skills, three delegated worker roles, a baseline general reviewer, four optional targeted specialists, and a separate docs gate across Claude Code, Codex, Pi, and other compatible harnesses:
+One skill: `/implement` (`$implement-lifecycle:implement` in Codex, `/skill:implement` in Pi). You orchestrate and keep the decisions. A subagent builds the change on its own branch and opens a PR, a different model family tries to break it, you judge the findings and record them in one PR comment, you run the change for real, and `ship <pr>` lands it.
 
-**Skills:**
-
-| Skill | Description |
-|-------|-------------|
-| `/implement` / `$implement-lifecycle:implement` | Lean orchestrator — 6-phase lifecycle (plan → implement → PR → review loop → docs gate → verify → merge). Accepts `#issue`, PR number, or freeform task. Supports trailing instructions like "just review" or "skip planning". |
-| `/merge-pr <pr-number> <handoff-artifact-path>` / `$implement-lifecycle:merge-pr <pr-number> <handoff-artifact-path>` | Lifecycle-internal merge step. Validates readiness and updates linked issues using the temporary verification artifact produced by `verify`; it fails closed without that artifact. |
-| `/pr-check` / `$implement-lifecycle:pr-check` | Pre-flight PR validation — branch naming, title, description, commits, references, plus an advisory scope note. |
-
-**Delegated worker roles** (invoked by the orchestrator, not directly):
-
-| Role | Description |
-|-------|-------------|
-| `implement-code` | Explore codebase, plan, write tests first, implement, self-review, commit, and create PR. |
-| `implement-address` | Address filtered review findings from the referee's action plan. |
-| `verify` | End-to-end verification and sole authoritative-suite owner — records one execution (or exact-head reusable evidence), checks downstream effects, and regression-tests existing flows. |
-
-**Review roles:**
-
-| Role | Focus |
-|-------|-------|
-| `review-general` | Baseline holistic reviewer for requirements, project conventions, established patterns, scope, integration, and test adequacy. |
-| `review-correctness` | Optional targeted specialist for logic bugs, edge cases, error handling, and race conditions. |
-| `review-security` | Optional targeted specialist for AuthZ, injection risks, and PII handling. |
-| `review-architecture` | Optional targeted specialist for module boundaries, coupling, and forward-looking design. |
-| `review-testing` | Optional targeted specialist for test coverage, assertion quality, edge cases, and test anti-patterns. |
-| `review-docs` | Separate Phase 4.5 docs-compliance gate for missing docs, stale docs, and frontmatter/cross-link correctness. |
-
-Heavy phases always run in fresh generic isolated delegated children. The canonical phase-to-skill mapping is shared by every harness: Claude Code selects `implement-lifecycle:<skill>`, Codex selects `$implement-lifecycle:<skill>`, and Pi's user-installed `pi-subagents` launches a generic `delegate` child with `skill: <skill>` and `context: "fresh"`. Compatible harnesses must explicitly load the mapped Agent Skill, pass the complete payload and context bundle, return the child result, and never fall back to inline execution when isolation or skill loading is unavailable. Selected reviewers run in parallel; empty or structurally incomplete reviewer results are recovered or retried before refereeing.
-
-Every lifecycle skill declares a machine-checkable, command-neutral suite capability. `verify` is the sole `full-suite-owner`; it discovers the target repository's authoritative verification command or ordered command plan from repository instructions, CI, development documentation, and build/test configuration. The orchestrator, implementers, addressers, reviewers, docs gate, PR checker, and merger are `focused-only` and may run focused checks without executing or consuming that plan. Verification evidence records the exact command or ordered plan once for the exact PR head, and merge uses that verified SHA as an atomic precondition.
-
-Enforced target-repository constraints are binding; explicit user direction selects only among permitted choices, and unresolved conflicts stop the merge. Bundled conventions are fallbacks only when both sources are silent about toolchains, branch names, commits, PR formatting, required checks, approvals, merge method, or branch retention. Findings handoffs use harness-provided or system-created temporary paths passed explicitly between workers, and verification passes a temporary, self-contained evidence artifact to the fresh merger. The docs gate follows an explicit review → address → re-review graph, so addressed documentation cannot skip directly to verification.
-
-The skill-local `agents/openai.yaml` files are optional OpenAI skill metadata that supplies presentation and invocation policy. They are not subagent definitions, are retained for Codex compatibility, and do not change the harness-neutral worker behavior. No custom Pi agent templates are distributed.
-
-Reviewers return their findings to the orchestrator and post nothing themselves. The orchestrator is the sole publisher to the PR timeline: it publishes one consolidated comment per round carrying every reviewer's findings plus its referee decisions.
-
-Codex CLI 0.145.0 note: full lifecycle delegation works in a standard Codex session; headless `codex exec --ephemeral` sessions fail to initialize spawned subagents.
+It needs [`ship`](tools/ship/README.md) on your `PATH`. `skills/implement/agents/openai.yaml` is optional Codex metadata for presentation and invocation policy.
 
 ### implement-cli
 
 > **🚧 Work in progress — not recommended for general use.** Unfinished and not
-> stable; its reviewer prompts drift from the canonical `implement-lifecycle`
-> review skills (tracked in
-> [#96](https://github.com/benjamcalvin/bootstraps/issues/96)) and its behaviour
-> may change without notice. Use
+> stable; its behaviour may change without notice. Use
 > `implement-lifecycle` (`/implement`) for day-to-day work.
 
-Single-skill plugin that mirrors the `/implement` lifecycle but delegates heavy work to Python Agent SDK subprocesses.
+Single-skill plugin that delegates heavy implementation work to Python Agent SDK subprocesses.
 
 | Skill | Description |
 |-------|-------------|
-| `/implement-cli` | Same 6-phase lifecycle as `/implement` (plan → implement → PR → review loop → docs gate → verify → merge), but the orchestrator runs review/address phases as `claude-agent-sdk` subprocesses with native async parallelism. Accepts the same argument shapes and trailing instructions as `/implement`. |
+| `/implement-cli` | 6-phase lifecycle (plan → implement → PR → review loop → docs gate → verify → merge). The orchestrator runs review/address phases as `claude-agent-sdk` subprocesses with native async parallelism. Accepts `#issue`, a PR number, or a freeform task, plus trailing instructions. |
 
 Reviewers return their findings to the orchestrator and post nothing themselves; the orchestrator is the sole publisher, posting one consolidated comment per round.
 
 ### implement-team
 
 > **⚠️ Deprecated — no longer maintained.** Use `implement-lifecycle`
-> (`/implement`) instead: it covers the same lifecycle, works on both Claude Code
-> and Codex, and does not depend on the experimental agent-teams runtime.
+> (`/implement`) instead: it works on both Claude Code and Codex, and does not
+> depend on the experimental agent-teams runtime.
 > `implement-team` stays installable so existing users are not broken, but it
 > receives no fixes and will be removed in a future release.
 
@@ -230,7 +179,7 @@ Requires Claude Code `>= 2.1.32` and `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. R
 |-------|------|
 | `team-implementer` | Long-lived implementer. Acts only on lead direction; refuses reviewer work requests and answers batched factual questions only. |
 | `team-verifier` | Long-lived verifier. Runs end-to-end verification on lead invocation and reports PASS/FAIL/PARTIAL/N/A evidence. |
-| `team-reviewer-correctness` | Correctness specialist — same focus as `review-correctness`, with persistent-team messaging discipline. |
+| `team-reviewer-correctness` | Correctness specialist with persistent-team messaging discipline. |
 | `team-reviewer-security` | Security / requirements-conformance specialist. |
 | `team-reviewer-architecture` | Architecture and design specialist. |
 | `team-reviewer-testing` | Test-quality specialist. |
@@ -293,6 +242,12 @@ Single-skill plugin that consults external AI CLIs for an independent code revie
 | `/second-opinion` | Fan out a review of the current changes to every supported external CLI installed (OpenAI Codex, Google Antigravity), run them read-only in parallel, cross-check findings, and present one consolidated review with per-provider attribution and consensus items first. Accepts an optional scope (`staged`, a PR number, or a git range) and/or a provider name (`codex` / `antigravity`); defaults to branch-vs-main across all available providers. Only reports — never applies fixes. |
 
 See [second-opinion/README.md](plugins/second-opinion/README.md) for full documentation.
+
+## Tools
+
+### ship
+
+[`tools/ship`](tools/ship/README.md) is a command-line tool, not a plugin. It merges one PR: it pins the head, waits for checks, squash-merges, confirms the merge, and watches the deploy in the background. `/implement` uses it to land changes.
 
 ## License
 

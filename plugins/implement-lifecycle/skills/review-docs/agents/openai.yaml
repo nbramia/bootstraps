@@ -1,6 +1,0 @@
-interface:
-  display_name: "Review Docs"
-  short_description: "Documentation compliance pull request review"
-  default_prompt: "Use $implement-lifecycle:review-docs to inspect this PR for missing or stale documentation."
-policy:
-  allow_implicit_invocation: false

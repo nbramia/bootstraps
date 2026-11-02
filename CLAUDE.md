@@ -5,7 +5,7 @@
 ### Install
 
 ```bash
-/plugin marketplace add benjamcalvin/bootstraps
+/plugin marketplace add nbramia/bootstraps
 /plugin install bootstrap-docs@bootstraps
 ```
 

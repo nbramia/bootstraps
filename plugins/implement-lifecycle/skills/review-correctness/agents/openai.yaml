@@ -1,6 +1,0 @@
-interface:
-  display_name: "Review Correctness"
-  short_description: "Correctness-focused pull request review"
-  default_prompt: "Use $implement-lifecycle:review-correctness to inspect this PR for logic bugs and regressions."
-policy:
-  allow_implicit_invocation: false

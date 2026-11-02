@@ -1,0 +1,51 @@
+#!/bin/bash
+# Claude Code hook: tell a session about a failed deploy or a dead ship run. Silent and
+# fast when there is none. Arg: session, prompt, agent (PostToolUse on Agent) or stop.
+# Each run is shown once per session and stays flagged until `ship --status <id>`.
+trap 'exit 0' ERR
+exec 2>/dev/null
+ROOT=${SHIP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ship}
+set -- "${1:-session}" "$ROOT"/active/*
+[ -e "$2" ] || exit 0
+# Unattended jobs must not get noisy. Their runs stay flagged for the next person.
+case "${CLAUDE_CODE_ENTRYPOINT:-}" in sdk-*) [ -n "${SHIP_NOTICE_FORCE:-}" ] || exit 0 ;; esac
+event=$1; shift
+input=$(cat)
+# Inside a subagent, even for its own Agent call: being shown there would use up the
+# once-per-session notice, and the main thread would never see it.
+case "$input" in *'"agent_id"'*) exit 0 ;; esac
+case "$input" in *'"stop_hook_active":true'*|*'"stop_hook_active": true'*) exit 0 ;; esac
+session=$(printf '%s' "$input" | sed -n 's/.*"session_id":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+seen=$ROOT/seen; mkdir -p "$seen"
+msg=""
+last() { sed -n "s/^[0-9]* $2 //p" "$1" | tail -n 1; }
+for a in "$@"; do
+  id=${a##*/}; f=$ROOT/runs/$id
+  if [ ! -f "$f" ] || [ -n "$(find "$a" -mtime +7)" ]; then rm -f "$a"; continue; fi
+  what="" d=$(last "$f" deploy) r=$(last "$f" result) p=$(last "$f" proc)
+  if [ -n "$d" ]; then
+    what="DEPLOY PROBLEM: ${d#* }"
+  elif kill -0 "${p%% *}" && [ "$(ps -o lstart= -p "${p%% *}")" = "${p#* }" ]; then
+    continue
+  elif [ -n "$(last "$f" watch)" ]; then
+    what="DEPLOY WATCH DIED for merge $(last "$f" merged) in $(last "$f" repo)."
+  elif [ -n "$r" ]; then
+    what="${r#* }"
+  else
+    what="DIED at stage $(last "$f" stage), PR #$(last "$f" pr) in $(last "$f" repo). It may have merged."
+  fi
+  key=$seen/$id.${session:-none}
+  [ ! -f "$key" ] || continue
+  : >"$key"
+  msg="${msg}ship run $id: $(printf '%s' "$what" | cut -c1-260) Check it: ship --status $id
+"
+done
+find "$seen" -type f -mtime +8 -delete
+[ -n "$msg" ] || exit 0
+esc=$(printf '%s' "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g' | awk '{ printf "%s\\n", $0 }' | tr -d '\000-\011\013-\037')
+case "$event" in
+  agent) printf '{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"%s"}}\n' "$esc" ;;
+  stop) printf '{"decision":"block","reason":"%s"}\n' "$esc" ;;
+  *) printf '%s' "$msg" ;;
+esac
+exit 0

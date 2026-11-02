@@ -1,6 +1,0 @@
-interface:
-  display_name: "Review Testing"
-  short_description: "Test quality and coverage pull request review"
-  default_prompt: "Use $implement-lifecycle:review-testing to inspect this PR for test quality and coverage gaps."
-policy:
-  allow_implicit_invocation: false
