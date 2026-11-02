@@ -287,6 +287,7 @@ scenario gone; rm "$S/ref.json"; ship 0 gone; has gone "already gone"; not_calle
 scenario fork; pr_json OPEN false MERGEABLE CLEAN "$PIN" main true >"$S/pr.1"; ship 0 fork; has fork "on a fork"; not_called fork "$DEL"
 # A failed delete is not a failed merge: retry, report GitHub's own words, note it in the record.
 scenario delfail; touch "$S/delete.fail"; ship 0 delfail; has delfail "delete failed 3 times: gh: Something went wrong"; hasnt delfail "may have moved"; has delfail "left behind"; grep -q ' result 0 .*left behind' "$(recf)" && ok || bad delfail "not in the record"
+scenario delvanish; touch "$S/delete.vanish"; ship 0 delvanish; has delvanish "already gone"; hasnt delvanish "left behind"; [ "$(grep -c updateRefs "$S/calls.log")" = 1 ] && ok || bad delvanish "tries: $(grep -c updateRefs "$S/calls.log")"
 scenario delflaky; echo 2 >"$S/delete.flaky"; ship 0 delflaky; has delflaky "deleted remote branch feat/x"; hasnt delflaky "left behind"; [ "$(grep -c updateRefs "$S/calls.log")" = 3 ] && ok || bad delflaky "tries: $(grep -c updateRefs "$S/calls.log")"
 
 # --- deploy watch outcomes

@@ -15,8 +15,10 @@ if [ "$target" = "$src" ]; then
 fi
 
 for f in ship ship-notice tests/lib.sh tests/ship.test.sh tests/live.test.sh tests/stub/gh; do
-  cp "$src/$f" "$target/$f"
-  chmod +x "$target/$f"
+  # Rename into place: a running ship keeps reading the file it started from.
+  cp "$src/$f" "$target/$f.new"
+  chmod +x "$target/$f.new"
+  mv -f "$target/$f.new" "$target/$f"
   echo "installed $target/$f"
 done
 

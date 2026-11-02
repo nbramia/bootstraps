@@ -877,9 +877,15 @@ delete_remote_branch() {
       log "deleted remote branch $HEAD_REF"
       return 0
     fi
+    # GitHub's own delete-on-merge can take the branch during this call.
+    local err; err=$(gh_err)
+    if ! gh_call api "repos/$REPO/git/ref/heads/$enc" --jq .object.sha >/dev/null && grep -q 'HTTP 404' "$GH_ERR"; then
+      log "remote branch $HEAD_REF already gone"
+      return 0
+    fi
     [ "$i" = 3 ] || sleep "$i" 3>&-
   done
-  branch_kept "delete failed 3 times: $(gh_err)"
+  branch_kept "delete failed 3 times: $err"
 }
 
 ### Deploy watch ###########################################################

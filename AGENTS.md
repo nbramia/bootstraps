@@ -61,3 +61,7 @@ Every change to a plugin **must** include a version bump in that plugin's `.clau
 4. Add entry to `.claude-plugin/marketplace.json`
 5. For Codex-compatible plugins, add `.codex-plugin/plugin.json` and an entry to `.agents/plugins/marketplace.json`
 6. Validate: `./validate-all.sh`
+
+## ship
+
+`tools/ship/` is the source for `ship` and `ship-notice`. After merging a change there, run `tools/ship/install.sh` so the installed copy matches.

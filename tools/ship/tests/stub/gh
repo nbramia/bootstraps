@@ -45,6 +45,7 @@ case "$1 $2" in
       *statusCheckRollup*) fail_if_flag checks; if [ -f "$STUB/checks.delay" ]; then sleep "$(cat "$STUB/checks.delay")"; rm "$STUB/checks.delay"; fi; f=$(seq_file checks); emit <"$f" ;;
       *refUpdateRule*) emit <"$STUB/ref_rule.json" ;;
       *updateRefs*)
+        [ -f "$STUB/delete.vanish" ] && { rm -f "$STUB/ref.json"; echo "gh: Something went wrong while executing your query" >&2; exit 1; }
         [ -f "$STUB/delete.fail" ] && { echo "gh: Something went wrong while executing your query" >&2; exit 1; }
         if [ -f "$STUB/delete.flaky" ]; then c=$(cat "$STUB/delete.flaky"); if [ "$c" -gt 0 ]; then echo $((c-1)) >"$STUB/delete.flaky"; echo "gh: Something went wrong while executing your query" >&2; exit 1; fi; fi
         echo '{}' ;;
