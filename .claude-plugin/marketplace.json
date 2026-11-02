@@ -57,36 +57,12 @@
       "license": "MIT"
     },
     {
-      "name": "implement-cli",
-      "source": "./plugins/implement-cli",
-      "description": "WIP — not recommended for general use. CLI-based multi-provider implementation lifecycle using the Python Agent SDK for subprocess orchestration",
-      "version": "1.4.1",
-      "category": "productivity",
-      "tags": ["implement", "cli", "agent-sdk", "multi-provider", "orchestrator", "review", "lifecycle", "wip"],
-      "author": {
-        "name": "benjamcalvin"
-      },
-      "license": "MIT"
-    },
-    {
       "name": "stop-guard",
       "source": "./plugins/stop-guard",
       "description": "Stop hook that evaluates task completion via Gemini CLI and blocks premature stops",
       "version": "1.7.3",
       "category": "productivity",
       "tags": ["hook", "stop", "guard", "completion", "evaluator", "gemini"],
-      "author": {
-        "name": "benjamcalvin"
-      },
-      "license": "MIT"
-    },
-    {
-      "name": "implement-team",
-      "source": "./plugins/implement-team",
-      "description": "DEPRECATED — use implement-lifecycle instead. Implementation lifecycle re-architected around Claude Code agent-teams — long-lived implementer and reviewer teammates with shared task list and mailbox messaging",
-      "version": "0.5.1",
-      "category": "productivity",
-      "tags": ["agent-teams", "implement", "review", "lifecycle", "collaboration", "experimental", "deprecated"],
       "author": {
         "name": "benjamcalvin"
       },
