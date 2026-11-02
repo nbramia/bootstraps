@@ -1,7 +1,7 @@
 # ADR-001: Task-delegation substrate, privilege tiers, and exposure model
 
 **Status:** Accepted
-**Last Updated:** 2026-07-19
+**Last Updated:** 2026-11-02
 **Decision:** Accepted
 
 **Issue:** [#77 — feat: generalize second-opinion into a privilege-tiered task-delegation tool](https://github.com/benjamcalvin/bootstraps/issues/77)
@@ -30,8 +30,8 @@ current design sidesteps become load-bearing:
    vectors that can steer a delegate into embedding malicious instructions in
    its output.
 
-A sibling plugin, `implement-cli` (`plugins/implement-cli/`, currently paused),
-already solves "delegate a read-write task to Claude via the Python Agent SDK,"
+A sibling plugin, `implement-cli` (paused at the time, since removed; [last version](https://github.com/nbramia/bootstraps/blob/d8a20e965b9e68cabe419eb2ff6ed8fc48e3f8fe/plugins/implement-cli)),
+already solved "delegate a read-write task to Claude via the Python Agent SDK,"
 with cost/depth tracking (`tracking.py`) and
 `permission_mode="bypassPermissions"` (`sdk.py`). So the generalization
 overlaps two existing substrates, and "which substrate" must be resolved before
@@ -78,7 +78,7 @@ reached, but through A's provider abstraction (`run_<provider>()` +
 whose binary is `claude` and whose headless mode is `claude -p`. Option B's
 valuable machinery (budget caps, depth limits in `tracking.py`) informs the
 budget-cap flags of the Claude provider but is not revived as the substrate.
-`implement-cli` remains paused and untouched.
+`implement-cli` was not revived, and has since been removed.
 
 Consequence: the `second-opinion` plugin grows a generalized `delegate.sh`
 (shape finalized in PR 2); `consult` remains the name of the default read-only
@@ -390,7 +390,7 @@ For the Claude provider, parallel delegates draw from the **same Pro/Max
 subscription bucket** as interactive use and can starve it. Mitigations:
 
 - Per-invocation budget caps: `claude -p --max-budget-usd` for headless
-  delegates; the pattern mirrors `implement-cli`'s existing `--max-cost` /
+  delegates; the pattern mirrors `implement-cli`'s `--max-cost` /
   `RunContext.max_cost_usd` enforcement.
 - Document the shared-bucket behavior in the skill; prefer external-CLI
   providers or API-key billing for heavy fan-out.
@@ -452,7 +452,7 @@ prior one established.
   primitive; its existing read-only review flow is the `consult` tier —
   review semantics unchanged, but runtime prerequisites change (next
   bullet).
-- `implement-cli` stays paused; its budget/depth patterns are inherited as
+- `implement-cli` was not revived; its budget/depth patterns are inherited as
   design, not as code.
 - A new pinned dependency (`srt`) becomes a hard prerequisite for `consult`
   delegation once PR 2 lands, extending to `act-sandboxed` when PR 3 lands —
@@ -475,4 +475,4 @@ prior one established.
 
 - [`plugins/second-opinion/scripts/consult.sh`](../../plugins/second-opinion/scripts/consult.sh) — The delegation primitive Decision 1 generalizes; its exit-code discipline (`0/1/2/3`) is the model for Decision 6's fail-closed errors.
 - [`plugins/second-opinion/skills/second-opinion/SKILL.md`](../../plugins/second-opinion/skills/second-opinion/SKILL.md) — Step 4 tripwire generalized by Decision 8; Step 3/5 mandatory-cleanup rule carried over in least-privilege pass-down; Step 5 synthesis discipline generalized by the inbound-exposure rules.
-- [`plugins/implement-cli/scripts/src/implement_cli/tracking.py`](../../plugins/implement-cli/scripts/src/implement_cli/tracking.py) — Budget/depth-cap patterns inherited as design (not code) for the Claude provider's quota mitigations.
+- [`implement_cli/tracking.py`, last version](https://github.com/nbramia/bootstraps/blob/d8a20e965b9e68cabe419eb2ff6ed8fc48e3f8fe/plugins/implement-cli/scripts/src/implement_cli/tracking.py) — Budget/depth-cap patterns inherited as design (not code) for the Claude provider's quota mitigations.
