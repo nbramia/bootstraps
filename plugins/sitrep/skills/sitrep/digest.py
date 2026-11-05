@@ -6,6 +6,10 @@ the pointers needed to trace an open question back to where it was first asked.
 Output goes to a file because it can run past the Bash tool's output limit, and
 a truncated digest would silently lose decisions. It prints the path and size.
 
+This reads Claude Code's transcript JSONL, which isn't a published format. If reports start
+missing messages or picking the wrong cutoff, check the record shapes in human_record() and
+agent_events() against a current transcript first.
+
 Usage:
   digest.py                      current session, drops the /sitrep turn itself
   digest.py --file PATH          any transcript, last human message is the cutoff
