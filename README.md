@@ -59,6 +59,9 @@ This package exposes its `skills/` directory through `package.json`; restart Pi,
 /plugin install bootstrap-worktrees@bootstraps
 /plugin install stop-guard@bootstraps
 /plugin install second-opinion@bootstraps
+
+# Session report
+/plugin install sitrep@bootstraps
 ```
 
 
@@ -118,6 +121,7 @@ $issue-management:refine-issue #42
 /plugin uninstall bootstrap-worktrees@bootstraps
 /plugin uninstall stop-guard@bootstraps
 /plugin uninstall second-opinion@bootstraps
+/plugin uninstall sitrep@bootstraps
 ```
 
 ## Available Plugins
@@ -130,6 +134,7 @@ $issue-management:refine-issue #42
 | **issue-management** | Yes | Yes | No | Draft, clean up, and refine GitHub issues — optimized for AI agent consumption. |
 | **stop-guard** | Yes | No | No | Stop hook that evaluates task completion via Gemini CLI and blocks premature stops. Opt-in per session via activation marker. |
 | **second-opinion** | Yes | No | No | Consult external AI CLIs (Codex, Antigravity) headlessly for an independent, read-only second-opinion code review of your changes. |
+| **sitrep** | Yes | No | No | Report what changed in a long-running session and every decision waiting on you, with enough context to answer without reading the transcript. |
 
 ### implement-lifecycle
 
@@ -194,6 +199,12 @@ Single-skill plugin that consults external AI CLIs for an independent code revie
 | `/second-opinion` | Fan out a review of the current changes to every supported external CLI installed (OpenAI Codex, Google Antigravity), run them read-only in parallel, cross-check findings, and present one consolidated review with per-provider attribution and consensus items first. Accepts an optional scope (`staged`, a PR number, or a git range) and/or a provider name (`codex` / `antigravity`); defaults to branch-vs-main across all available providers. Only reports — never applies fixes. |
 
 See [second-opinion/README.md](plugins/second-opinion/README.md) for full documentation.
+
+### sitrep
+
+| Skill | Description |
+|-------|-------------|
+| `/sitrep` | Read the session transcript, including anything lost to compaction, and report what changed since your last message and everything waiting on you. Each decision carries enough context to answer from that message alone. It only reports, and running subagents keep running. |
 
 ## Tools
 
