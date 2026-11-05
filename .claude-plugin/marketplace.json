@@ -84,7 +84,7 @@
       "name": "sitrep",
       "source": "./plugins/sitrep",
       "description": "Report what changed in a long-running session and every decision waiting on you, with enough context to answer without reading the transcript",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "category": "productivity",
       "tags": ["session", "summary", "decisions", "long-running"],
       "author": {
