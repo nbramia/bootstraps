@@ -64,4 +64,4 @@ Every change to a plugin **must** include a version bump in that plugin's `.clau
 
 ## ship
 
-`tools/ship/` is the source for `ship` and `ship-notice`. After merging a change there, run `tools/ship/install.sh` so the installed copy matches.
+`tools/ship/` is the source for `ship` and `ship-notice`. The hourly deploy in `nbramia/homelab` runs its tests and `tools/ship/install.sh` after a change merges, and Syncthing carries the result to each machine.
