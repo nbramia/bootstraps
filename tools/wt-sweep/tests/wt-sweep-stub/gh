@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Stub gh for the wt-sweep tests. State lives in $STUB. It answers the two calls
+# wt-sweep makes, printing the file contents as the final --jq output:
+#   gh repo view ...  -> $STUB/repo   (NWO and default branch, US-separated)
+#   gh pr list ...    -> $STUB/prs    (name, state, head oid, number, base; US-separated)
+# $STUB/gh.fail makes every call fail.
+printf '%s\n' "$*" >>"$STUB/calls.log"
+[ ! -f "$STUB/gh.fail" ] || { echo "stub gh: forced failure" >&2; exit 1; }
+case "$1 $2" in
+  "repo view") cat "$STUB/repo" ;;
+  "pr list") cat "$STUB/prs" ;;
+  *) echo "stub gh: unhandled: $*" >&2; exit 99 ;;
+esac

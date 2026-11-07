@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pi package metadata and installation guidance for `implement-lifecycle`; Pi users can discover its shared skills and delegate through their separately installed `pi-subagents`
 - `sitrep` 1.0.0: report what changed in a long-running session and every decision waiting on you
 - `tools/ship`: the `ship` and `ship-notice` commands, their tests, an installer and a sample `ship.conf`
+- `tools/wt-sweep`: the `wt-sweep` command, its tests and an installer
 
 ### Changed
 

@@ -29,7 +29,8 @@ bootstraps/
 │       │   └── hooks.json
 │       └── references/      # On-demand documentation
 ├── tools/                 # Command-line tools that are not plugins
-│   └── ship/              # Merge one PR and watch its deploy
+│   ├── ship/              # Merge one PR and watch its deploy
+│   └── wt-sweep/          # Remove merged, clean worktrees and branches
 ├── validate-all.sh        # Plugin validation script
 └── README.md
 ```
@@ -65,3 +66,7 @@ Every change to a plugin **must** include a version bump in that plugin's `.clau
 ## ship
 
 `tools/ship/` is the source for `ship` and `ship-notice`. The hourly deploy in `nbramia/homelab` runs its tests and `tools/ship/install.sh` after a change merges, and Syncthing carries the result to each machine.
+
+## wt-sweep
+
+`tools/wt-sweep/` is the source for `wt-sweep`. Edit it only there; `tools/wt-sweep/install.sh` copies it and its tests to `~/Code/Sync/bin`. Its tests run with `bash tools/wt-sweep/tests/wt-sweep.test.sh`.

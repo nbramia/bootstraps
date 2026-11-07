@@ -1,0 +1,420 @@
+#!/usr/bin/env bash
+# wt-sweep: classify git worktrees and local branches; with --apply remove the safe ones.
+# Bash 3.2 compatible. No GNU-only tools. Everything prints to stdout.
+set -u
+
+usage() {
+  cat <<'EOF'
+wt-sweep [--repo-path p] [--apply] [--older-than days] [--include-orca]
+
+List worktrees and local branches and say which could go. Dry run by default.
+Dry runs use local refs as they stand, with no fetch, so they can under-report
+what is merged. --apply fetches first, and may remove more than a dry run listed.
+
+--apply removes only what is merged (PR state from gh, or ancestry), clean,
+unlocked, not in use, and without unpushed commits, then runs git worktree prune.
+Clean also means no ignored files beyond build output (node_modules, dist, and so on).
+It never touches the main or current worktree, the default branch, dirty
+worktrees, or branches with unmerged work.
+
+  --older-than N   Also require no commit and no file change in the last N days.
+  --include-orca   Allow removing Orca workspaces: anything under ~/orca/workspaces
+                   or listed by `orca worktree list`. They are kept by default.
+
+In use means a process has its cwd inside, or a file changed in the last
+WT_SWEEP_RECENT_MIN minutes (default 60, 0 turns that check off).
+Exit: 0 ok, 1 a removal failed or the repo is unreadable, 2 usage.
+EOF
+}
+
+US=$'\037'
+REPO_PATH="" APPLY=0 OLDER="" INCLUDE_ORCA=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --repo-path) [ $# -ge 2 ] || { echo "wt-sweep: --repo-path needs a value"; exit 2; }; REPO_PATH=$2; shift 2 ;;
+    --repo-path=*) REPO_PATH=${1#--repo-path=}; shift ;;
+    --apply) APPLY=1; shift ;;
+    --include-orca) INCLUDE_ORCA=1; shift ;;
+    --older-than) [ $# -ge 2 ] || { echo "wt-sweep: --older-than needs a value"; exit 2; }; OLDER=$2; shift 2 ;;
+    --older-than=*) OLDER=${1#--older-than=}; shift ;;
+    *) echo "wt-sweep: unknown argument $1"; usage; exit 2 ;;
+  esac
+done
+case "$OLDER" in ''|*[!0-9]*) [ -z "$OLDER" ] || { echo "wt-sweep: --older-than takes whole days"; exit 2; } ;; esac
+RECENT_MIN=${WT_SWEEP_RECENT_MIN:-60}
+export GH_PROMPT_DISABLED=1 GH_PAGER=cat GH_NO_UPDATE_NOTIFIER=1 NO_COLOR=1
+
+CALLER_CWD=$(pwd -P)
+[ -n "$REPO_PATH" ] || REPO_PATH=$CALLER_CWD
+if ! REPO_PATH=$(cd "$REPO_PATH" 2>/dev/null && pwd -P); then echo "wt-sweep: no such directory"; exit 1; fi
+git_r() { git -C "$REPO_PATH" "$@"; }
+git_r rev-parse --git-dir >/dev/null 2>&1 || { echo "wt-sweep: $REPO_PATH is not a git repo"; exit 1; }
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/wt-sweep.XXXXXX") || exit 1
+trap 'rm -rf "$TMP"' EXIT
+trap 'exit 130' INT TERM HUP
+
+# Any toplevel this run must not touch: where it was called from and --repo-path.
+CURRENT_TOP=$(git -C "$CALLER_CWD" rev-parse --show-toplevel 2>/dev/null)
+ARG_TOP=$(git_r rev-parse --show-toplevel 2>/dev/null)
+real() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
+[ -z "$CURRENT_TOP" ] || CURRENT_TOP=$(real "$CURRENT_TOP")
+[ -z "$ARG_TOP" ] || ARG_TOP=$(real "$ARG_TOP")
+
+### Repo facts ##############################################################
+GH_OK=0 NWO="" DEFAULT=""
+if line=$(cd "$REPO_PATH" && gh repo view --json nameWithOwner,defaultBranchRef --jq '[.nameWithOwner,.defaultBranchRef.name]|join("\u001f")' 2>/dev/null </dev/null); then
+  IFS=$US read -r NWO DEFAULT <<<"$line"
+fi
+if [ -z "$DEFAULT" ]; then
+  DEFAULT=$(git_r symbolic-ref --short -q refs/remotes/origin/HEAD 2>/dev/null); DEFAULT=${DEFAULT#origin/}
+fi
+if [ -z "$DEFAULT" ]; then
+  echo "wt-sweep: cannot tell the default branch (gh failed and origin/HEAD is unset). Nothing to do safely."
+  exit 1
+fi
+
+if [ "$APPLY" = 1 ]; then
+  git_r fetch --quiet --no-tags origin 2>/dev/null || { echo "wt-sweep: git fetch failed; refusing to apply on stale refs"; exit 1; }
+fi
+
+PR_LIMIT=3000
+: >"$TMP/prs"
+if [ -n "$NWO" ]; then
+  if gh pr list --repo "$NWO" --state all --limit "$PR_LIMIT" --json number,state,headRefName,headRefOid,baseRefName,isCrossRepository \
+      --jq '.[] | select(.isCrossRepository|not) | [.headRefName,.state,.headRefOid,(.number|tostring),.baseRefName] | join("\u001f")' >"$TMP/prs" 2>/dev/null </dev/null; then
+    GH_OK=1
+  fi
+fi
+
+BASE=""
+for r in "refs/remotes/origin/$DEFAULT" "refs/heads/$DEFAULT"; do
+  if git_r show-ref --verify --quiet "$r"; then BASE=$r; break; fi
+done
+[ -n "$BASE" ] || { echo "wt-sweep: no ref found for default branch $DEFAULT"; exit 1; }
+
+### Process snapshot ########################################################
+PROCS_OK=0
+snapshot_procs() {
+  local p t
+  PROCS_OK=0
+  : >"$TMP/cwds"
+  if [ -e /proc/self/cwd ]; then
+    for p in /proc/[0-9]*; do
+      t=$(readlink "$p/cwd" 2>/dev/null) && printf '%s\n' "$t"
+    done >"$TMP/cwds"
+  elif PATH="$PATH:/usr/sbin:/sbin" command -v lsof >/dev/null 2>&1; then
+    PATH="$PATH:/usr/sbin:/sbin" lsof -w -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' >"$TMP/cwds"
+  fi
+  [ -s "$TMP/cwds" ] && PROCS_OK=1
+}
+has_process_inside() { # path
+  P=$1 awk 'BEGIN { p = ENVIRON["P"] } $0 == p || index($0, p "/") == 1 { f = 1; exit } END { exit !f }' "$TMP/cwds"
+}
+snapshot_procs
+
+PRUNE_DIRS=( -name node_modules -o -name .git -o -name .venv -o -name venv -o -name __pycache__ )
+changed_within_min() { [ -n "$(find "$1" \( "${PRUNE_DIRS[@]}" \) -prune -o -type f -mmin "-$2" -print -quit 2>/dev/null)" ]; }
+changed_within_days() { [ -n "$(find "$1" \( "${PRUNE_DIRS[@]}" \) -prune -o -type f -mtime "-$2" -print -quit 2>/dev/null)" ]; }
+
+# Ignored files that a build or install recreates. Any other ignored file (.env,
+# local notes) is lost for good by `git worktree remove`, so it keeps the worktree.
+ignored_keepers() { # path: prints up to 3 such files, comma-joined
+  git -C "$1" --no-optional-locks status --porcelain --ignored=matching 2>/dev/null | sed -n 's/^!! //p' | awk '
+    BEGIN { n = split("node_modules .venv venv __pycache__ .pytest_cache .mypy_cache .ruff_cache .next .turbo .cache .parcel-cache .svelte-kit .wrangler dist build target out coverage .coverage .DS_Store", a, " ")
+            for (i = 1; i <= n; i++) skip[a[i]] = 1 }
+    { f = $0; gsub(/"/, "", f); b = f; sub(/\/$/, "", b); sub(/.*\//, "", b)
+      if (!(b in skip) && b !~ /\.pyc$/) { c++; if (c <= 3) s = s (c > 1 ? ", " : "") f } }
+    END { if (c > 3) s = s ", +" (c - 3) " more"; if (c) print s }'
+}
+
+### Orca workspaces ########################################################
+ORCA_OK=1
+ORCA_RAW="$HOME/orca/workspaces"
+ORCA_ROOT=$(real "$ORCA_RAW")
+: >"$TMP/orca"
+load_orca() {
+  local bin pid wd rc
+  bin=${WT_SWEEP_ORCA_BIN-$(command -v orca 2>/dev/null || echo /Applications/Orca.app/Contents/Resources/bin/orca)}
+  if [ ! -x "$bin" ]; then
+    # Orca's data without its CLI: it may manage worktrees this run cannot see.
+    if [ -d "$HOME/.config/orca" ] || [ -d "$HOME/Library/Application Support/orca" ]; then ORCA_OK=0; fi
+    return 0
+  fi
+  # Time-limited, since `timeout` does not exist on macOS.
+  "$bin" worktree list --json --limit 100000 >"$TMP/orca.json" 2>/dev/null </dev/null &
+  pid=$!
+  ( s=""; trap 'kill "$s" 2>/dev/null; exit 0' TERM; sleep 20 & s=$!; wait "$s"; kill "$pid" ) >/dev/null 2>&1 &
+  wd=$!
+  wait "$pid"; rc=$?
+  kill "$wd" 2>/dev/null; wait "$wd" 2>/dev/null
+  if [ "$rc" -ne 0 ] || ! python3 -c '
+import json, os, sys
+r = json.load(open(sys.argv[1]))["result"]
+if r.get("truncated"): sys.exit(1)
+for w in r["worktrees"]:
+    print(os.path.realpath(w["path"]))
+' "$TMP/orca.json" >"$TMP/orca" 2>/dev/null; then
+    ORCA_OK=0
+    : >"$TMP/orca"
+  fi
+}
+[ "$INCLUDE_ORCA" = 1 ] || load_orca
+is_orca() { # path realpath
+  case "$1/" in "$ORCA_RAW"/*) return 0 ;; esac
+  case "$2/" in "$ORCA_ROOT"/*) return 0 ;; esac
+  grep -Fxq -- "$2" "$TMP/orca"
+}
+
+### Merge classification ####################################################
+# Sets C_MERGED (empty or how), C_OPEN (PR number), C_NOTE, C_UNPUSHED (count).
+C_MERGED="" C_OPEN="" C_NOTE="" C_UNPUSHED=0
+classify() { # tip branch
+  local tip=$1 branch=$2 name st head num base pr_covers=0
+  C_MERGED="" C_OPEN="" C_NOTE="" C_UNPUSHED=0
+  if [ -n "$branch" ]; then
+    while IFS=$US read -r name st head num base; do
+      [ -n "$name" ] || continue
+      case "$st" in
+        OPEN) C_OPEN=$num ;;
+        MERGED)
+          if [ "$head" = "$tip" ]; then
+            pr_covers=1
+            if [ "$base" = "$DEFAULT" ]; then C_MERGED="PR#$num"
+            else C_NOTE="PR#$num merged into $base, not $DEFAULT"; fi
+          elif git_r cat-file -e "$head^{commit}" 2>/dev/null; then
+            if git_r merge-base --is-ancestor "$tip" "$head" 2>/dev/null; then
+              # Local branch is behind what the PR merged, so nothing here is lost.
+              pr_covers=1
+              if [ "$base" = "$DEFAULT" ]; then C_MERGED="PR#$num"
+              else C_NOTE="PR#$num merged into $base, not $DEFAULT"; fi
+            elif git_r merge-base --is-ancestor "$head" "$tip" 2>/dev/null; then
+              C_NOTE="commits after merged PR#$num"
+            fi
+          fi ;;
+      esac
+    done <<EOT
+$(B=$branch awk -F"$US" 'BEGIN { b = ENVIRON["B"] } $1 == b' "$TMP/prs")
+EOT
+  fi
+  if git_r merge-base --is-ancestor "$tip" "$BASE" 2>/dev/null; then
+    [ -n "$C_MERGED" ] || C_MERGED="ancestor"
+    C_NOTE=""
+    return 0
+  fi
+  # A PR head was on GitHub even if the remote branch has since been deleted.
+  [ -n "$C_MERGED" ] && C_NOTE=""
+  if [ "$pr_covers" = 1 ]; then return 0; fi
+  C_UNPUSHED=$(git_r rev-list --count "$tip" --not --remotes 2>/dev/null) || C_UNPUSHED=unknown
+}
+
+### Worktrees ###############################################################
+# path, head, branch, locked, prunable, bare, detached
+git_r worktree list --porcelain >"$TMP/wt.raw" || { echo "wt-sweep: git worktree list failed"; exit 1; }
+awk -v OFS="$US" '
+  function flush() { if (p != "") print p, h, b, l, x, bare }
+  /^worktree / { flush(); p = substr($0, 10); h = b = l = x = bare = "" ; next }
+  /^HEAD /     { h = $2; next }
+  /^branch /   { b = substr($0, 8); sub(/^refs\/heads\//, "", b); next }
+  /^bare/      { bare = 1; next }
+  /^locked/    { l = 1; next }
+  /^prunable/  { x = 1; next }
+  END { flush() }' "$TMP/wt.raw" >"$TMP/wt"
+
+MAIN_WT=$(head -n 1 "$TMP/wt" | cut -d "$US" -f 1)
+rel() { case "$1" in "$MAIN_WT"/*) printf '%s' "${1#"$MAIN_WT"/}" ;; *) printf '%s' "$1" ;; esac; }
+
+NEWER_THAN_EPOCH=""
+[ -z "$OLDER" ] || NEWER_THAN_EPOCH=$(( $(date +%s) - OLDER * 86400 ))
+tip_is_recent() { # sha
+  local c; c=$(git_r log -1 --format=%ct "$1" 2>/dev/null)
+  [ -n "$NEWER_THAN_EPOCH" ] && [ -n "$c" ] && [ "$c" -gt "$NEWER_THAN_EPOCH" ]
+}
+
+add_reason() { REASONS="${REASONS:+$REASONS, }$1"; printf '%s\n' "$1" | sed -E 's/ .*//' >>"$TMP/$2.reasons"; }
+
+WT_TOTAL=0 WT_REMOVE=0 WT_KEEP=0 WT_PRUNABLE=0 PRUNE_BLOCKED=0
+: >"$TMP/wt.reasons"; : >"$TMP/br.reasons"; : >"$TMP/wt.lines"; : >"$TMP/wt.remove"; : >"$TMP/held"
+while IFS=$US read -r path head branch locked prunable bare; do
+  [ -n "$path" ] || continue
+  WT_TOTAL=$((WT_TOTAL + 1))
+  [ -z "$branch" ] || printf '%s%s%s\n' "$branch" "$US" "$path" >>"$TMP/held"
+  label="$(rel "$path") [${branch:-detached ${head:0:9}}]"
+  case "$path" in */.claude/worktrees/*) label="$label (agent)" ;; esac
+  if [ -n "$prunable" ]; then
+    if [ "$INCLUDE_ORCA" != 1 ] && is_orca "$path" "$(real "$path")"; then
+      # git worktree prune takes every stale entry or none.
+      PRUNE_BLOCKED=$((PRUNE_BLOCKED + 1))
+      WT_KEEP=$((WT_KEEP + 1))
+      REASONS=""; add_reason "orca-managed (directory gone; pass --include-orca)" wt
+      printf 'KEEP   %s: %s\n' "$label" "$REASONS" >>"$TMP/wt.lines"
+      continue
+    fi
+    WT_PRUNABLE=$((WT_PRUNABLE + 1))
+    printf 'PRUNE  %s: directory is gone\n' "$label" >>"$TMP/wt.lines"
+    continue
+  fi
+  REASONS=""
+  rpath=$(real "$path")
+  [ -z "$bare" ] || add_reason "bare" wt
+  [ "$path" != "$MAIN_WT" ] || add_reason "main worktree" wt
+  if [ "$rpath" = "$CURRENT_TOP" ] || [ "$rpath" = "$ARG_TOP" ]; then add_reason "current worktree" wt; fi
+  [ "$branch" != "$DEFAULT" ] || add_reason "default branch" wt
+  [ -z "$locked" ] || add_reason "locked" wt
+  if [ "$INCLUDE_ORCA" != 1 ]; then
+    if is_orca "$path" "$rpath"; then add_reason "orca-managed (pass --include-orca)" wt
+    elif [ "$ORCA_OK" != 1 ]; then add_reason "orca-check-unavailable" wt
+    fi
+  fi
+
+  if ! st=$(git -C "$path" --no-optional-locks status --porcelain 2>/dev/null); then
+    add_reason "status-error" wt
+  elif [ -n "$st" ]; then
+    add_reason "dirty" wt
+  fi
+  keepers=$(ignored_keepers "$path")
+  [ -z "$keepers" ] || add_reason "ignored-files ($keepers)" wt
+
+  if [ "$PROCS_OK" != 1 ]; then add_reason "process-check-unavailable" wt
+  elif has_process_inside "$rpath"; then add_reason "in-use (process cwd inside)" wt
+  fi
+  if [ "$RECENT_MIN" != 0 ] && changed_within_min "$rpath" "$RECENT_MIN"; then
+    add_reason "in-use (file changed within ${RECENT_MIN}m)" wt
+  fi
+
+  classify "$head" "$branch"
+  via=$C_MERGED
+  [ -z "$C_OPEN" ] || add_reason "open-pr (#$C_OPEN)" wt
+  if [ -z "$C_MERGED" ]; then add_reason "not-merged${C_NOTE:+ ($C_NOTE)}" wt; fi
+  if [ "$C_UNPUSHED" != 0 ]; then add_reason "unpushed ($C_UNPUSHED commits)" wt; fi
+  if [ -n "$OLDER" ] && { tip_is_recent "$head" || changed_within_days "$rpath" "$OLDER"; }; then
+    add_reason "newer-than-${OLDER}d" wt
+  fi
+
+  if [ -z "$REASONS" ]; then
+    WT_REMOVE=$((WT_REMOVE + 1))
+    printf 'REMOVE %s: merged via %s, clean, unlocked, idle, pushed\n' "$label" "$via" >>"$TMP/wt.lines"
+    printf '%s%s%s%s%s\n' "$path" "$US" "$head" "$US" "$branch" >>"$TMP/wt.remove"
+  else
+    WT_KEEP=$((WT_KEEP + 1))
+    printf 'KEEP   %s: %s\n' "$label" "$REASONS" >>"$TMP/wt.lines"
+  fi
+done <"$TMP/wt"
+
+### Branches without a worktree #############################################
+BR_TOTAL=0 BR_REMOVE=0 BR_KEEP=0
+: >"$TMP/br.lines"; : >"$TMP/br.remove"
+while IFS=$US read -r branch tip; do
+  [ -n "$branch" ] || continue
+  if B=$branch awk -F"$US" 'BEGIN { b = ENVIRON["B"] } $1 == b { f = 1; exit } END { exit !f }' "$TMP/held"; then continue; fi
+  BR_TOTAL=$((BR_TOTAL + 1))
+  REASONS=""
+  [ "$branch" != "$DEFAULT" ] || add_reason "default branch" br
+  classify "$tip" "$branch"
+  via=$C_MERGED
+  [ -z "$C_OPEN" ] || add_reason "open-pr (#$C_OPEN)" br
+  if [ -z "$C_MERGED" ]; then add_reason "not-merged${C_NOTE:+ ($C_NOTE)}" br; fi
+  if [ "$C_UNPUSHED" != 0 ]; then add_reason "unpushed ($C_UNPUSHED commits)" br; fi
+  if [ -n "$OLDER" ] && tip_is_recent "$tip"; then add_reason "newer-than-${OLDER}d" br; fi
+  if [ -z "$REASONS" ]; then
+    BR_REMOVE=$((BR_REMOVE + 1))
+    printf 'REMOVE %s: merged via %s, pushed (tip %s)\n' "$branch" "$via" "${tip:0:9}" >>"$TMP/br.lines"
+    printf '%s%s%s\n' "$branch" "$US" "$tip" >>"$TMP/br.remove"
+  else
+    BR_KEEP=$((BR_KEEP + 1))
+    printf 'KEEP   %s: %s\n' "$branch" "$REASONS" >>"$TMP/br.lines"
+  fi
+done <<EOT
+$(git_r for-each-ref refs/heads --format="%(refname:short)$US%(objectname)")
+EOT
+
+### Unregistered directories under .claude/worktrees ########################
+ORPHANS=0; : >"$TMP/orphans"
+if [ -n "$MAIN_WT" ] && [ -d "$MAIN_WT/.claude/worktrees" ]; then
+  for d in "$MAIN_WT/.claude/worktrees"/*/; do
+    [ -d "$d" ] || continue
+    d=${d%/}
+    if ! P=$d awk -F"$US" 'BEGIN { p = ENVIRON["P"] } $1 == p { f = 1; exit } END { exit !f }' "$TMP/wt"; then
+      ORPHANS=$((ORPHANS + 1)); printf 'LEAVE  %s: not a registered worktree\n' "$(rel "$d")" >>"$TMP/orphans"
+    fi
+  done
+fi
+
+### Report ##################################################################
+echo "wt-sweep $REPO_PATH (${NWO:-no GitHub repo}), default $DEFAULT, $( [ "$APPLY" = 1 ] && echo APPLY || echo 'dry run' )"
+[ "$GH_OK" = 1 ] || echo "WARNING: PR state unavailable from gh; using ancestry only, so squash merges look unmerged"
+[ "$(wc -l <"$TMP/prs" | tr -d ' ')" -lt "$PR_LIMIT" ] || echo "WARNING: hit the $PR_LIMIT PR limit; older squash merges may look unmerged"
+[ "$ORCA_OK" = 1 ] || echo "WARNING: orca worktree list unavailable; every worktree counts as possibly Orca-managed"
+[ "$PROCS_OK" = 1 ] || echo "WARNING: cannot list process working directories; every worktree counts as in use"
+[ "$APPLY" = 1 ] || echo "note: no fetch in a dry run; merge state is as of the last fetch"
+echo
+echo "Worktrees ($WT_TOTAL)"; cat "$TMP/wt.lines"
+echo
+echo "Branches without a worktree ($BR_TOTAL)"; cat "$TMP/br.lines"
+if [ "$ORPHANS" -gt 0 ]; then echo; echo "Unregistered directories ($ORPHANS)"; cat "$TMP/orphans"; fi
+
+### Apply ###################################################################
+FAILED=0 DONE_WT=0 DONE_BR=0
+delete_branch() { # branch expected_tip
+  local cur
+  cur=$(git_r rev-parse --verify -q "refs/heads/$1") || { echo "  branch $1 already gone"; return 0; }
+  if [ "$cur" != "$2" ]; then
+    echo "  KEPT branch $1: it moved to ${cur:0:9} during this run"; return 0
+  fi
+  # -D because -d refuses squash-merged branches. Merge state and the unchanged tip are checked above.
+  if git_r branch -q -D "$1" 2>"$TMP/err"; then
+    DONE_BR=$((DONE_BR + 1)); echo "  deleted branch $1 (was ${2:0:9})"
+  else
+    FAILED=$((FAILED + 1)); echo "  FAILED to delete branch $1: $(head -n 1 "$TMP/err")"
+  fi
+}
+if [ "$APPLY" = 1 ]; then
+  echo; echo "Applying"
+  while IFS=$US read -r path head branch; do
+    [ -n "$path" ] || continue
+    # Recheck just before acting; the listing above may be some seconds old.
+    rpath=$(real "$path")
+    if [ "$INCLUDE_ORCA" != 1 ]; then
+      load_orca
+      if [ "$ORCA_OK" != 1 ] || is_orca "$path" "$rpath"; then echo "  KEPT $(rel "$path"): Orca now manages it, or its list failed"; continue; fi
+    fi
+    snapshot_procs
+    if [ "$PROCS_OK" != 1 ] || has_process_inside "$rpath"; then echo "  KEPT $(rel "$path"): now in use"; continue; fi
+    if [ -n "$(git -C "$path" --no-optional-locks status --porcelain 2>/dev/null)" ]; then echo "  KEPT $(rel "$path"): now dirty"; continue; fi
+    if [ -n "$(ignored_keepers "$path")" ]; then echo "  KEPT $(rel "$path"): now has ignored files"; continue; fi
+    if [ "$(git -C "$path" rev-parse HEAD 2>/dev/null)" != "$head" ]; then echo "  KEPT $(rel "$path"): HEAD moved"; continue; fi
+    if git_r worktree remove "$path" 2>"$TMP/err"; then
+      DONE_WT=$((DONE_WT + 1)); echo "  removed worktree $(rel "$path")"
+      [ -z "$branch" ] || delete_branch "$branch" "$head"
+    else
+      FAILED=$((FAILED + 1)); echo "  FAILED to remove $(rel "$path"): $(head -n 1 "$TMP/err")"
+    fi
+  done <"$TMP/wt.remove"
+  while IFS=$US read -r branch tip; do
+    [ -n "$branch" ] || continue
+    delete_branch "$branch" "$tip"
+  done <"$TMP/br.remove"
+  if [ "$PRUNE_BLOCKED" -gt 0 ]; then
+    echo "  skipped git worktree prune: it would also drop $PRUNE_BLOCKED Orca entries"
+  else
+    git_r worktree prune && echo "  ran git worktree prune"
+  fi
+fi
+
+### Summary #################################################################
+tally() { # file: "reason count" sorted by count
+  sort "$1" | uniq -c | sort -rn | awk '{ n = $1; $1 = ""; sub(/^ /, ""); printf "%s%s=%d", (NR > 1 ? ", " : ""), $0, n } END { if (NR) print ""; else print "none" }'
+}
+echo
+echo "SUMMARY"
+verb="would remove"; [ "$APPLY" = 1 ] && verb="removed"
+if [ "$APPLY" = 1 ]; then rw=$DONE_WT rb=$DONE_BR; else rw=$WT_REMOVE rb=$BR_REMOVE; fi
+echo "worktrees: $WT_TOTAL total, $verb $rw, kept $WT_KEEP, directory gone $WT_PRUNABLE"
+echo "  kept because: $(tally "$TMP/wt.reasons")"
+echo "branches without a worktree: $BR_TOTAL total, removable $BR_REMOVE, kept $BR_KEEP"
+echo "  kept because: $(tally "$TMP/br.reasons")"
+[ "$APPLY" != 1 ] || echo "branches deleted, including those of removed worktrees: $rb"
+[ "$ORPHANS" -eq 0 ] || echo "unregistered directories under .claude/worktrees: $ORPHANS (left alone)"
+[ "$FAILED" -eq 0 ] || { echo "failures: $FAILED"; exit 1; }
+exit 0

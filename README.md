@@ -212,6 +212,10 @@ See [second-opinion/README.md](plugins/second-opinion/README.md) for full docume
 
 [`tools/ship`](tools/ship/README.md) is a command-line tool, not a plugin. It merges one PR: it pins the head, waits for checks, squash-merges, confirms the merge, and watches the deploy in the background. `/implement` uses it to land changes.
 
+### wt-sweep
+
+[`tools/wt-sweep`](tools/wt-sweep/README.md) is a command-line tool, not a plugin. It lists a repo's worktrees and local branches and, with `--apply`, removes the ones that are merged, clean, idle and fully pushed.
+
 ## License
 
 MIT
