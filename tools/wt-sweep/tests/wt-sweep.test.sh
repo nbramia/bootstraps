@@ -16,13 +16,16 @@ trap 'rm -rf "$ROOT"' EXIT
 export HOME=$ROOT/home; mkdir -p "$HOME"
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@example.invalid GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@example.invalid
+# Inherited repo-selecting variables (a git hook, a caller with GIT_DIR set) must not reach a real repo.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+  GIT_COMMON_DIR GIT_NAMESPACE GIT_CEILING_DIRECTORIES GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
 export WT_SWEEP_RECENT_MIN=0 WT_SWEEP_ORCA_BIN=$ROOT/no-such-orca
 
 ok() { PASS=$((PASS + 1)); }
 bad() { FAIL=$((FAIL + 1)); FAILED_NAMES="$FAILED_NAMES $1"; echo "not ok: $1: $2"; [ -z "$OUT" ] || sed 's/^/    /' <<<"$OUT"; }
 has() { case "$OUT" in *"$2"*) ok ;; *) bad "$1" "output lacks [$2]" ;; esac; }
 hasnt() { case "$OUT" in *"$2"*) bad "$1" "output has [$2]" ;; *) ok ;; esac; }
-rc_is() { if [ "$RC" -eq "$2" ]; then ok; else bad "$1" "exit $RC, wanted $2"; fi; }
+rc_is() { if [ "$2" -eq "$3" ]; then ok; else bad "$1" "exit $2, wanted $3"; fi; }
 dir_exists() { if [ -d "$2" ]; then ok; else bad "$1" "missing directory $2"; fi; }
 dir_gone() { if [ -d "$2" ]; then bad "$1" "directory still there: $2"; else ok; fi; }
 branch_exists() { if git -C "$W/repo" show-ref --verify --quiet "refs/heads/$2"; then ok; else bad "$1" "branch $2 is gone"; fi; }
