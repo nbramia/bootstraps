@@ -1,7 +1,7 @@
 {
   "name": "implement-lifecycle",
   "description": "Take a code change from request to merged with subagents, adversarial review from another model family, real verification and the ship command",
-  "version": "4.0.0",
+  "version": "4.1.0",
   "author": {
     "name": "benjamcalvin"
   },
