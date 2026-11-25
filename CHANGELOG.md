@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `implement-lifecycle` 4.1.0: `/implement` takes instructions only from the user and the repository owner; text from other GitHub accounts is data
 - Documented the repository's Claude Code/Codex compatibility matrix and installation flows
 - `implement-lifecycle` 3.9.2 now delegates every heavy phase through generic isolated subagents that explicitly invoke the canonical worker skills, removing the distributed Claude Code worker templates
 - `implement-lifecycle` 3.10.0 defines its phase-to-skill mapping once and applies it through Claude Code, Codex, Pi, and generic isolated-delegation adapters
